@@ -403,26 +403,29 @@ pub fn fixture() -> Stats {
     }
 }
 
-/// A suspended NVIDIA dGPU, named from procfs, and an AMD iGPU.
+/// A suspended NVIDIA dGPU, named from procfs, with its VRAM size from the cache (D4), and an
+/// AMD iGPU named from `pci.ids`.
 fn gpus() -> Vec<GpuSample> {
     vec![
         GpuSample {
             card: "card0".into(),
+            nvidia: true,
             name: Some("NVIDIA GeForce RTX 4060 Laptop GPU".into()),
+            uuid: Some("GPU-6e9f6c15-581b-4f11-c568-db1698fe7502".into()),
             status: RuntimeStatus::Suspended,
-            busy: None,
-            vram_used: None,
-            vram_total: None,
-            celsius: None,
+            vram_used: Some(0),
+            vram_total: Some(8188 << 20),
+            ..GpuSample::default()
         },
         GpuSample {
             card: "card1".into(),
-            name: None,
+            name: Some("AMD Radeon 680M".into()),
             status: RuntimeStatus::Active,
             busy: Some(33),
             vram_used: Some(644_245_094),
             vram_total: Some(2 * GIB),
             celsius: Some(51.0),
+            ..GpuSample::default()
         },
     ]
 }

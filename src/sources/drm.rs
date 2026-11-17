@@ -6,7 +6,7 @@
 //! [`RuntimeStatus::may_query`] says so (D3).
 
 /// A device's runtime power-management state, from `power/runtime_status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RuntimeStatus {
     Active,
     Suspended,
@@ -15,6 +15,7 @@ pub enum RuntimeStatus {
     /// Runtime PM is disabled for the device, so it stays powered.
     Unsupported,
     /// `error`, or anything this version doesn't know.
+    #[default]
     Unknown,
 }
 

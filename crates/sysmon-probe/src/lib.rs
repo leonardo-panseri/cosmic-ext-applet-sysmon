@@ -9,9 +9,10 @@
 //! by construction.
 //!
 //! The probe does nothing between requests: no timers, no threads. Blocked on stdin, it makes no
-//! wakeups.
+//! wakeups. It holds no NVML state between requests either ([`nvidia`]).
 
 pub mod mounts;
+pub mod nvidia;
 pub mod procs;
 
 use std::io::{self, BufRead, Write};
@@ -23,6 +24,7 @@ use sysmon_proto::{MAX_TOP, Reply, Request};
 #[derive(Debug)]
 pub struct Host {
     scanner: procs::Scanner,
+    gpus: nvidia::Gpus,
 }
 
 impl Default for Host {
@@ -32,10 +34,20 @@ impl Default for Host {
 }
 
 impl Host {
+    /// This host. With `SYSMON_DEBUG` in the environment, slow NVML samples are logged.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_gpus(nvidia::Gpus::new(
+            std::env::var_os("SYSMON_DEBUG").is_some(),
+        ))
+    }
+
+    /// This host's processes and mounts, with `gpus` for [`Request::Gpus`].
+    #[must_use]
+    pub fn with_gpus(gpus: nvidia::Gpus) -> Self {
         Self {
             scanner: procs::Scanner::new(Path::new("/proc")),
+            gpus,
         }
     }
 
@@ -49,8 +61,10 @@ impl Host {
             Request::Mounts => Reply::Mounts {
                 mounts: mounts::read(Path::new("/proc/self/mounts")),
             },
-            // NVML comes in P4; this probe must not touch any GPU.
-            Request::Gpus { .. } => Reply::Unsupported,
+            Request::Gpus { nvml } => Reply::Gpus {
+                gpus: self.gpus.answer(nvml),
+            },
+            // NVML is shut down after every sample: nothing to release.
             Request::Release => Reply::Released,
         }
         .bounded()
@@ -88,9 +102,15 @@ mod tests {
     use super::*;
     use sysmon_proto::{decode_reply, encode};
 
+    /// A host whose GPU part sees no NVIDIA driver, so tests never touch a GPU.
+    fn host() -> Host {
+        let nowhere = Path::new("/nonexistent/sysmon-test");
+        Host::with_gpus(nvidia::Gpus::with(nowhere, nowhere, || None, false))
+    }
+
     fn session(input: &str) -> Vec<Reply> {
         let mut output = Vec::new();
-        serve(io::Cursor::new(input), &mut output, &mut Host::new()).unwrap();
+        serve(io::Cursor::new(input), &mut output, &mut host()).unwrap();
         String::from_utf8(output)
             .unwrap()
             .lines()
@@ -118,7 +138,11 @@ mod tests {
         .concat();
         assert_eq!(
             session(&input)[1..],
-            [Reply::Released, Reply::Unsupported, Reply::Released]
+            [
+                Reply::Released,
+                Reply::Gpus { gpus: vec![] },
+                Reply::Released
+            ]
         );
     }
 
@@ -138,12 +162,12 @@ mod tests {
     fn an_overlong_line_ends_the_session() {
         let input = "x".repeat(sysmon_proto::MAX_LINE_BYTES + 1);
         let mut output = Vec::new();
-        assert!(serve(io::Cursor::new(input), &mut output, &mut Host::new()).is_err());
+        assert!(serve(io::Cursor::new(input), &mut output, &mut host()).is_err());
     }
 
     #[test]
     fn processes_are_capped_at_five_per_list() {
-        let Reply::Processes(top) = Host::new().answer(Request::Processes { top: 200 }) else {
+        let Reply::Processes(top) = host().answer(Request::Processes { top: 200 }) else {
             panic!("not a processes reply");
         };
         assert_eq!(top.by_cpu.len(), 5);

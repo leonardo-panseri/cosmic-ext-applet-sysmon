@@ -290,6 +290,7 @@ mod tests {
             bottom: None,
             down: None,
             up: None,
+            gpu_card: None,
             warnings: vec![
                 Warning::CpuTemp {
                     celsius: 91,
@@ -335,6 +336,7 @@ mod tests {
             bottom: None,
             down: None,
             up: None,
+            gpu_card: None,
             warnings: vec![],
         };
         assert_eq!(tooltip(Some(&summary)), "");

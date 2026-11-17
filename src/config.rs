@@ -1,12 +1,100 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! The stored settings (§2.3): [`PanelSettings`] in cosmic-config, one key per field in
-//! `~/.config/cosmic/<app id>/v1/`. Anything the applet only caches, such as the VRAM sizes of
-//! D4, belongs in cosmic-config *state* under its own type, not here.
+//! `~/.config/cosmic/<app id>/v1/`. What the applet only caches, the VRAM sizes of D4, is
+//! cosmic-config *state* instead ([`VramCache`]).
 
-use cosmic::cosmic_config::{self, CosmicConfigEntry};
+use std::collections::BTreeMap;
+
+use cosmic::cosmic_config::{self, ConfigGet, ConfigSet, CosmicConfigEntry};
 
 use crate::panel::PanelSettings;
+use crate::sources::MAX_GPUS;
+
+/// The version of the state's layout.
+pub const STATE_VERSION: u64 = 1;
+/// The state key of the VRAM sizes: a map from GPU UUID to bytes.
+pub const VRAM_KEY: &str = "vram_total";
+/// Most cards remembered (D8); a card seen later than that is shown without its size.
+const MAX_REMEMBERED: usize = 2 * MAX_GPUS;
+
+/// Each NVIDIA card's VRAM size, by UUID, as seen the first time it was awake, so a suspended
+/// card can show it without being woken (D4). Written only when a size changes.
+#[derive(Debug, Default)]
+pub struct VramCache {
+    /// `None` without a state directory, or in tests: kept in memory only.
+    state: Option<cosmic_config::Config>,
+    totals: BTreeMap<String, u64>,
+}
+
+impl VramCache {
+    /// The applet's cache in cosmic-config state: `~/.local/state/cosmic/<app id>/v1/`, or in
+    /// a Flatpak the app's own `$XDG_STATE_HOME` (`~/.var/app/<app id>/.local/state/cosmic/…`).
+    /// `Config::new_state` would use the host's `~/.local/state` there, which the sandbox can't
+    /// write without a permission (`xdg-state` isn't one), so it would land in a tmpfs. The
+    /// cache is the applet's alone, so its private state directory is enough.
+    pub fn open(app_id: &str) -> Self {
+        let sandbox_state = std::env::var_os("FLATPAK_ID")
+            .and(std::env::var_os("XDG_STATE_HOME"))
+            .filter(|dir| !dir.is_empty());
+        let state = match sandbox_state {
+            Some(dir) => cosmic_config::Config::with_custom_path(app_id, STATE_VERSION, dir.into()),
+            None => cosmic_config::Config::new_state(app_id, STATE_VERSION),
+        };
+        match state {
+            Ok(state) => Self::with_state(state),
+            Err(why) => {
+                eprintln!("can't open the applet's state: {why}; VRAM sizes aren't remembered");
+                Self::default()
+            }
+        }
+    }
+
+    /// The cache stored in `state`.
+    pub fn with_state(state: cosmic_config::Config) -> Self {
+        let totals = state
+            .get::<BTreeMap<String, u64>>(VRAM_KEY)
+            .unwrap_or_else(|why| {
+                // `NotFound` until the first card is seen awake.
+                if why.is_err() {
+                    eprintln!("can't read the cached VRAM sizes: {why}");
+                }
+                BTreeMap::new()
+            })
+            .into_iter()
+            .take(MAX_REMEMBERED)
+            .collect();
+        Self {
+            state: Some(state),
+            totals,
+        }
+    }
+
+    /// The VRAM size of the card with `uuid`, bytes, if it was ever seen awake.
+    #[must_use]
+    pub fn get(&self, uuid: &str) -> Option<u64> {
+        self.totals.get(uuid).copied()
+    }
+
+    /// Remembers that the card with `uuid` has `total` bytes of VRAM. Writes the state only when
+    /// that is news.
+    pub fn remember(&mut self, uuid: &str, total: u64) {
+        if self.get(uuid) == Some(total)
+            || (self.totals.len() >= MAX_REMEMBERED && !self.totals.contains_key(uuid))
+        {
+            return;
+        }
+        self.totals.insert(uuid.to_owned(), total);
+        if crate::probe_client::debug() {
+            eprintln!("config: remembered VRAM {uuid} = {total} bytes");
+        }
+        if let Some(state) = &self.state
+            && let Err(why) = state.set(VRAM_KEY, &self.totals)
+        {
+            eprintln!("can't store the VRAM size: {why}");
+        }
+    }
+}
 
 /// Opens the applet's config and reads it. Without it, changes last only until a restart.
 pub fn load(app_id: &str) -> (Option<cosmic_config::Config>, PanelSettings) {
@@ -128,6 +216,49 @@ mod tests {
         let folder = dir.path().join("cosmic").join(APP_ID).join("v1");
         assert!(folder.join("warn_temp").is_file());
         assert!(!folder.join("layout").exists());
+    }
+
+    const UUID: &str = "GPU-6e9f6c15-581b-4f11-c568-db1698fe7502";
+
+    #[test]
+    fn vram_sizes_survive_a_restart_and_are_written_only_when_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = || {
+            cosmic_config::Config::with_custom_path(APP_ID, STATE_VERSION, dir.path().into())
+                .unwrap()
+        };
+        let mut cache = VramCache::with_state(state());
+        assert_eq!(cache.get(UUID), None);
+        cache.remember(UUID, 8188 << 20);
+        let file = dir
+            .path()
+            .join("cosmic")
+            .join(APP_ID)
+            .join("v1")
+            .join(VRAM_KEY);
+        assert!(file.is_file());
+        // The same size again: no write. Any write would bring the file back.
+        std::fs::remove_file(&file).unwrap();
+        cache.remember(UUID, 8188 << 20);
+        assert!(!file.exists());
+        cache.remember(UUID, 4096 << 20);
+        assert!(file.is_file());
+
+        let reopened = VramCache::with_state(state());
+        assert_eq!(reopened.get(UUID), Some(4096 << 20));
+        assert_eq!(reopened.get("GPU-other"), None);
+    }
+
+    #[test]
+    fn the_vram_cache_is_bounded() {
+        let mut cache = VramCache::default();
+        for i in 0..40 {
+            cache.remember(&format!("GPU-{i}"), 1);
+        }
+        assert_eq!(cache.totals.len(), MAX_REMEMBERED);
+        // Known cards still update.
+        cache.remember("GPU-0", 2);
+        assert_eq!(cache.get("GPU-0"), Some(2));
     }
 
     #[test]

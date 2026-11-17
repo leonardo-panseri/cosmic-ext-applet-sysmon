@@ -36,7 +36,7 @@ pub enum RowKind {
     Cpu,
     /// Memory in use, %.
     Memory,
-    /// The first awake GPU's load, %.
+    /// The first awake GPU's load, %, NVIDIA first.
     Gpu,
     /// The root filesystem's used space, %, as in the reference.
     Disk,
@@ -174,16 +174,18 @@ pub enum Warning {
 }
 
 impl Warning {
-    /// Whether a row showing `kind` shows the value this warning is about, so it takes the
-    /// warning's colour. The CPU and GPU rows show load, which has no limit; the Disk row shows
-    /// only the root filesystem.
+    /// Whether a row showing `kind` owns this warning, so it takes the warning's colour, as in
+    /// the reference: both CPU rows own the CPU temperature; the GPU row the temperature of the
+    /// GPU it shows, the card `gpu_card`; the Disk row the root filesystem; the Memory row memory.
+    /// `NVMe` drives have no row.
     #[must_use]
-    pub fn colours(&self, kind: RowKind) -> bool {
+    pub fn colours(&self, kind: RowKind, gpu_card: Option<&str>) -> bool {
         match self {
-            Self::CpuTemp { .. } => kind == RowKind::CpuTemp,
+            Self::CpuTemp { .. } => matches!(kind, RowKind::Cpu | RowKind::CpuTemp),
+            Self::GpuTemp { card, .. } => kind == RowKind::Gpu && gpu_card == Some(card.as_str()),
             Self::Memory { .. } => kind == RowKind::Memory,
             Self::Filesystem { mount, .. } => kind == RowKind::Disk && mount == "/",
-            Self::GpuTemp { .. } | Self::Nvme { .. } => false,
+            Self::Nvme { .. } => false,
         }
     }
 }
@@ -250,6 +252,8 @@ pub struct PanelSummary {
     /// Network download and upload; both `None` when the rates are hidden.
     pub down: Option<String>,
     pub up: Option<String>,
+    /// The DRM card the GPU row shows, which owns its temperature warning.
+    pub gpu_card: Option<String>,
     /// Also listed in the panel button's tooltip.
     pub warnings: Vec<Warning>,
 }
@@ -271,24 +275,27 @@ impl PanelSummary {
             bottom: row_value(settings.bottom, stats),
             down,
             up,
+            gpu_card: stats.first_awake_gpu().map(|g| g.card.clone()),
             warnings: warnings(stats, settings),
         }
     }
 
-    /// Whether a row showing `kind` takes the warning colour: its own value is at or above its
-    /// limit.
+    /// Whether a row showing `kind` takes the warning colour: it owns a warning
+    /// ([`Warning::colours`]).
     #[must_use]
     pub fn row_warns(&self, kind: RowKind) -> bool {
-        self.warnings.iter().any(|w| w.colours(kind))
+        let gpu_card = self.gpu_card.as_deref();
+        self.warnings.iter().any(|w| w.colours(kind, gpu_card))
     }
 
-    /// Whether the whole button takes the warning colour: some warning is about a value none of
-    /// the `shown` rows shows.
+    /// Whether the whole button takes the warning colour: some warning is owned by none of the
+    /// `shown` rows.
     #[must_use]
     pub fn button_warns(&self, shown: &[RowKind]) -> bool {
+        let gpu_card = self.gpu_card.as_deref();
         self.warnings
             .iter()
-            .any(|w| !shown.iter().any(|kind| w.colours(*kind)))
+            .any(|w| !shown.iter().any(|kind| w.colours(*kind, gpu_card)))
     }
 }
 
@@ -337,12 +344,22 @@ mod tests {
     fn amd_gpu(busy: u8, celsius: f32) -> GpuSample {
         GpuSample {
             card: "card1".into(),
-            name: None,
             status: RuntimeStatus::Active,
             busy: Some(busy),
-            vram_used: None,
-            vram_total: None,
             celsius: Some(celsius),
+            ..GpuSample::default()
+        }
+    }
+
+    fn nvidia_gpu(status: RuntimeStatus, busy: Option<u8>, celsius: Option<f32>) -> GpuSample {
+        GpuSample {
+            card: "card0".into(),
+            nvidia: true,
+            name: Some("RTX 4060".into()),
+            status,
+            busy,
+            celsius,
+            ..GpuSample::default()
         }
     }
 
@@ -365,6 +382,7 @@ mod tests {
                 bottom: Some("45%".into()),
                 down: Some("1.2K".into()),
                 up: Some("20B".into()),
+                gpu_card: None,
                 warnings: vec![],
             }
         );
@@ -451,11 +469,8 @@ mod tests {
 
     #[test]
     fn a_gpu_warning_names_the_card_and_its_model() {
-        let mut nvidia = amd_gpu(10, 91.4);
-        nvidia.card = "card0".into();
-        nvidia.name = Some("RTX 4060".into());
         let stats = Stats {
-            gpus: vec![nvidia],
+            gpus: vec![nvidia_gpu(RuntimeStatus::Active, Some(10), Some(91.4))],
             ..Stats::default()
         };
         assert_eq!(
@@ -534,16 +549,19 @@ mod tests {
     }
 
     #[test]
-    fn cpu_temperature_colours_only_the_temperature_row() {
+    fn cpu_temperature_colours_both_cpu_rows() {
         let summary = summary(&Stats {
             cpu_temp: Some(90.0),
             ..Stats::default()
         });
-        // The CPU row shows load, which has no limit: the warning isn't on the bar.
-        assert!(!summary.row_warns(RowKind::Cpu));
-        assert!(summary.button_warns(&DEFAULT_ROWS));
+        // As in the reference's warning example: the CPU row turns red, not the whole button.
+        assert!(summary.row_warns(RowKind::Cpu));
+        assert!(!summary.row_warns(RowKind::Memory));
+        assert!(!summary.button_warns(&DEFAULT_ROWS));
         assert!(summary.row_warns(RowKind::CpuTemp));
-        assert!(!summary.button_warns(&[RowKind::Cpu, RowKind::CpuTemp]));
+        assert!(!summary.button_warns(&[RowKind::Memory, RowKind::CpuTemp]));
+        // Neither CPU row on the bar: the whole button.
+        assert!(summary.button_warns(&[RowKind::Memory, RowKind::Disk]));
     }
 
     #[test]
@@ -565,9 +583,63 @@ mod tests {
     }
 
     #[test]
-    fn gpu_and_nvme_temperatures_are_never_on_the_bar() {
-        let summary = summary(&Stats {
+    fn the_gpu_row_owns_the_temperature_of_the_gpu_it_shows() {
+        let hot_amd = summary(&Stats {
             gpus: vec![amd_gpu(20, 95.0)],
+            ..Stats::default()
+        });
+        assert_eq!(hot_amd.gpu_card.as_deref(), Some("card1"));
+        assert!(hot_amd.row_warns(RowKind::Gpu));
+        assert!(!hot_amd.button_warns(&[RowKind::Gpu, RowKind::Memory]));
+        assert!(hot_amd.button_warns(&DEFAULT_ROWS));
+
+        // The awake NVIDIA card is shown; the hot iGPU isn't, so the whole button warns.
+        let shows_nvidia = summary(&Stats {
+            gpus: vec![
+                amd_gpu(20, 95.0),
+                nvidia_gpu(RuntimeStatus::Active, Some(50), Some(70.0)),
+            ],
+            ..Stats::default()
+        });
+        assert_eq!(shows_nvidia.gpu_card.as_deref(), Some("card0"));
+        assert!(!shows_nvidia.row_warns(RowKind::Gpu));
+        assert!(shows_nvidia.button_warns(&[RowKind::Gpu, RowKind::Memory]));
+
+        // A hot NVIDIA card on the GPU row.
+        let hot_nvidia = summary(&Stats {
+            gpus: vec![
+                amd_gpu(20, 50.0),
+                nvidia_gpu(RuntimeStatus::Active, Some(90), Some(88.0)),
+            ],
+            ..Stats::default()
+        });
+        assert!(hot_nvidia.row_warns(RowKind::Gpu));
+        assert!(!hot_nvidia.button_warns(&[RowKind::Gpu, RowKind::Memory]));
+    }
+
+    #[test]
+    fn a_suspended_nvidia_card_leaves_the_gpu_row_to_the_igpu() {
+        let stats = Stats {
+            gpus: vec![
+                nvidia_gpu(RuntimeStatus::Suspended, None, None),
+                amd_gpu(7, 45.0),
+            ],
+            ..Stats::default()
+        };
+        let summary = PanelSummary::new(
+            &stats,
+            &PanelSettings {
+                top: RowKind::Gpu,
+                ..PanelSettings::default()
+            },
+        );
+        assert_eq!(summary.top.as_deref(), Some("7%"));
+        assert_eq!(summary.gpu_card.as_deref(), Some("card1"));
+    }
+
+    #[test]
+    fn nvme_temperatures_are_never_on_the_bar() {
+        let summary = summary(&Stats {
             drives: vec![DriveTemp {
                 name: "Samsung SSD 980 PRO".into(),
                 celsius: 74.0,
@@ -575,7 +647,7 @@ mod tests {
             }],
             ..Stats::default()
         });
-        assert_eq!(summary.warnings.len(), 2);
+        assert_eq!(summary.warnings.len(), 1);
         for kind in RowKind::ALL {
             assert!(!summary.row_warns(kind), "{kind:?}");
         }

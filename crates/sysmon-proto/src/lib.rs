@@ -11,7 +11,7 @@
 //! unsandboxed, so its whole interface is read-only by construction.
 //!
 //! Replies are bounded (D8): [`Reply::bounded`] keeps at most [`MAX_TOP`] processes per list,
-//! [`MAX_MOUNTS`] mounts and [`MAX_NAME_CHARS`] characters per name. The probe builds its replies
+//! [`MAX_MOUNTS`] mounts, [`MAX_GPUS`] GPUs and [`MAX_NAME_CHARS`] characters per name. The probe builds its replies
 //! within those bounds and [`decode_reply`] applies them again, so the applet never holds more,
 //! whatever it is talking to. A line longer than [`MAX_LINE_BYTES`] is an error.
 
@@ -26,6 +26,8 @@ pub const VERSION: u32 = 1;
 pub const MAX_TOP: u8 = 5;
 /// Most mounts in a reply (D8).
 pub const MAX_MOUNTS: usize = 16;
+/// Most GPUs in a reply (D8).
+pub const MAX_GPUS: usize = 8;
 /// Longest name kept from system-supplied text, in characters (D8).
 pub const MAX_NAME_CHARS: usize = 64;
 /// Longest line either side reads. A bounded reply is a few kilobytes.
@@ -39,9 +41,11 @@ pub enum Request {
     Processes { top: u8 },
     /// Real block-device filesystems and their space.
     Mounts,
-    /// GPU stats; with `nvml`, through the host's NVML. Answered [`Reply::Unsupported`] until P4.
+    /// The NVIDIA GPUs the driver lists; with `nvml`, each awake one's stats through the host's
+    /// NVML (ADR 0003). Without it, or for a card that isn't awake, nothing touches the card.
     Gpus { nvml: bool },
-    /// Drop any handles held for [`Request::Gpus`] (NVML), so a GPU can suspend.
+    /// Drop any handles held for [`Request::Gpus`]. NVML is shut down after every sample
+    /// (ADR 0003), so there is never anything to drop; kept for older applets.
     Release,
 }
 
@@ -56,6 +60,10 @@ pub enum Reply {
     Processes(TopProcesses),
     Mounts {
         mounts: Vec<Mount>,
+    },
+    /// The NVIDIA GPUs, in the driver's order; empty without the NVIDIA driver.
+    Gpus {
+        gpus: Vec<NvidiaGpu>,
     },
     /// The request is known but this probe doesn't answer it (yet).
     Unsupported,
@@ -111,6 +119,45 @@ impl Mount {
     }
 }
 
+/// An NVIDIA GPU, as the probe found it in `/proc/driver/nvidia/gpus/`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NvidiaGpu {
+    /// The PCI address, e.g. `0000:01:00.0`.
+    pub bus_id: String,
+    #[serde(flatten)]
+    pub state: NvidiaState,
+}
+
+/// What became of an NVIDIA GPU in a [`Request::Gpus`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum NvidiaState {
+    /// Not asked: NVML wasn't requested, or the card wasn't awake (`runtime_status` other than
+    /// `active`), so nothing touched it.
+    Skipped,
+    /// Awake, but NVML isn't installed or failed.
+    Unavailable,
+    /// Awake, and NVML answered. Implausible readings are `None`.
+    Sampled(NvmlSample),
+}
+
+/// One NVML sample of a GPU. Each value is `None` when NVML didn't give a plausible one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NvmlSample {
+    /// `GPU-…`, as in `/proc/driver/nvidia/gpus/*/information`.
+    pub uuid: Option<String>,
+    pub name: Option<String>,
+    /// GPU load, % (0–100).
+    pub util: Option<u8>,
+    /// GPU core temperature, °C.
+    pub celsius: Option<f32>,
+    /// Board power draw, W.
+    pub watts: Option<f32>,
+    /// Video memory in use and in all, bytes.
+    pub vram_used: Option<u64>,
+    pub vram_total: Option<u64>,
+}
+
 impl Reply {
     /// This reply within the bounds of D8.
     #[must_use]
@@ -131,6 +178,18 @@ impl Reply {
                     m.fs_type = clip_name(&m.fs_type);
                 }
                 Self::Mounts { mounts }
+            }
+            Self::Gpus { mut gpus } => {
+                gpus.truncate(MAX_GPUS);
+                for gpu in &mut gpus {
+                    gpu.bus_id = clip_name(&gpu.bus_id);
+                    if let NvidiaState::Sampled(sample) = &mut gpu.state {
+                        sample.uuid = sample.uuid.as_deref().map(clip_name);
+                        sample.name = sample.name.as_deref().map(clip_name);
+                        sample.util = sample.util.filter(|u| *u <= 100);
+                    }
+                }
+                Self::Gpus { gpus }
             }
             Self::Error { message } => Self::Error {
                 message: clip_name(&message),
@@ -270,6 +329,18 @@ mod tests {
         }
     }
 
+    fn sample() -> NvmlSample {
+        NvmlSample {
+            uuid: Some("GPU-6e9f6c15-581b-4f11-c568-db1698fe7502".into()),
+            name: Some("NVIDIA GeForce RTX 4060 Laptop GPU".into()),
+            util: Some(37),
+            celsius: Some(52.0),
+            watts: Some(31.5),
+            vram_used: Some(512 << 20),
+            vram_total: Some(8188 << 20),
+        }
+    }
+
     /// `line` as JSON, after checking it is one line. Key order depends on `serde_json`'s
     /// features, which the workspace may unify, so tests compare values.
     fn json(line: &str) -> serde_json::Value {
@@ -319,6 +390,22 @@ mod tests {
             }),
             Reply::Mounts {
                 mounts: vec![mount("/")],
+            },
+            Reply::Gpus {
+                gpus: vec![
+                    NvidiaGpu {
+                        bus_id: "0000:01:00.0".into(),
+                        state: NvidiaState::Sampled(sample()),
+                    },
+                    NvidiaGpu {
+                        bus_id: "0000:02:00.0".into(),
+                        state: NvidiaState::Skipped,
+                    },
+                    NvidiaGpu {
+                        bus_id: "0000:03:00.0".into(),
+                        state: NvidiaState::Unavailable,
+                    },
+                ],
             },
             Reply::Unsupported,
             Reply::Released,
@@ -385,6 +472,46 @@ mod tests {
             panic!()
         };
         assert_eq!(mounts.len(), 16);
+    }
+
+    #[test]
+    fn gpu_replies_are_bounded() {
+        let long = "x".repeat(200);
+        let gpu = NvidiaGpu {
+            bus_id: long.clone(),
+            state: NvidiaState::Sampled(NvmlSample {
+                name: Some(long),
+                util: Some(250),
+                ..sample()
+            }),
+        };
+        let reply = Reply::Gpus {
+            gpus: vec![gpu; 20],
+        };
+        let Reply::Gpus { gpus } = decode_reply(&encode(&reply)).unwrap() else {
+            panic!()
+        };
+        assert_eq!(gpus.len(), MAX_GPUS);
+        assert_eq!(gpus[0].bus_id.len(), 64);
+        let NvidiaState::Sampled(sample) = &gpus[0].state else {
+            panic!()
+        };
+        assert_eq!(sample.name.as_deref().map(str::len), Some(64));
+        assert_eq!(sample.util, None);
+    }
+
+    #[test]
+    fn a_skipped_gpu_is_one_small_object() {
+        let line = encode(&Reply::Gpus {
+            gpus: vec![NvidiaGpu {
+                bus_id: "0000:01:00.0".into(),
+                state: NvidiaState::Skipped,
+            }],
+        });
+        assert_eq!(
+            json(&line),
+            serde_json::json!({"v": 1, "reply": "gpus", "gpus": [{"bus_id": "0000:01:00.0", "state": "skipped"}]})
+        );
     }
 
     #[test]

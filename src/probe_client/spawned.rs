@@ -242,7 +242,10 @@ fn answers(request: Request, reply: &Reply) -> bool {
         (request, reply),
         (Request::Processes { .. }, Reply::Processes(_))
             | (Request::Mounts, Reply::Mounts { .. })
-            | (Request::Gpus { .. }, Reply::Unsupported)
+            | (
+                Request::Gpus { .. },
+                Reply::Gpus { .. } | Reply::Unsupported
+            )
             | (Request::Release, Reply::Released)
     )
 }

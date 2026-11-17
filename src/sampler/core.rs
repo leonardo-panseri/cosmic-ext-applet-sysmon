@@ -6,8 +6,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::readers::Wants;
 use super::stats::{Sample, Stats, Tracker};
-use crate::panel::{PanelSettings, PanelSummary};
+use crate::panel::{PanelSettings, PanelSummary, RowKind};
 
 /// The sampling interval, in both tiers (D2).
 pub const INTERVAL: Duration = Duration::from_secs(2);
@@ -39,6 +40,8 @@ pub struct Core {
     settings: PanelSettings,
     tracker: Tracker,
     popup_open: bool,
+    /// Stay in the open tier whatever the popup does (`SYSMON_DEBUG_OPEN`).
+    force_open: bool,
     on_battery: bool,
     /// When the last sample was taken, and its update.
     last: Option<(Instant, Update)>,
@@ -53,9 +56,32 @@ impl Core {
             settings,
             tracker: Tracker::default(),
             popup_open: false,
+            force_open: false,
             on_battery: false,
             last: None,
             sent: None,
+        }
+    }
+
+    /// With `force_open`, a sampler that stays in the open tier, for debugging.
+    #[must_use]
+    pub fn forced_open(mut self, force_open: bool) -> Self {
+        self.force_open = force_open;
+        self.popup_open |= force_open;
+        self
+    }
+
+    /// What the current tier reads beyond the closed tier: the processes while the popup is
+    /// open, NVIDIA stats too, or whenever the panel button shows `gpu` (D2).
+    #[must_use]
+    pub fn wants(&self) -> Wants {
+        let gpu_shown = self
+            .settings
+            .shown_rows(self.settings.layout)
+            .contains(&RowKind::Gpu);
+        Wants {
+            processes: self.popup_open,
+            nvml: self.popup_open || gpu_shown,
         }
     }
 
@@ -67,12 +93,6 @@ impl Core {
         } else {
             INTERVAL
         }
-    }
-
-    /// Whether the popup is open: the open tier.
-    #[must_use]
-    pub fn popup_open(&self) -> bool {
-        self.popup_open
     }
 
     /// When the next sample is due: one interval after the last, or right away.
@@ -101,6 +121,7 @@ impl Core {
     pub fn control(&mut self, control: Control) -> Option<Update> {
         match control {
             Control::PopupOpen(open) => {
+                let open = open || self.force_open;
                 let opened = open && !self.popup_open;
                 self.popup_open = open;
                 let last = self.last.as_ref().map(|(_, update)| update.clone());
@@ -217,7 +238,7 @@ mod tests {
         };
         let update = core.control(Control::Settings(shows_temp.clone())).unwrap();
         assert_eq!(update.panel.bottom.as_deref(), Some("88°C"));
-        // The hot CPU moved onto the bar: its row warns, not the whole button.
+        // The hot CPU's temperature row warns, not the whole button.
         let shown = shows_temp.shown_rows(shows_temp.layout);
         assert!(update.panel.row_warns(RowKind::CpuTemp));
         assert!(!update.panel.button_warns(&shown));
@@ -229,15 +250,14 @@ mod tests {
         let update = core.sample(sample, t0 + INTERVAL).unwrap();
         assert_eq!(update.panel.bottom.as_deref(), Some("89°C"));
 
-        // Back to memory: the hot CPU is off the bar again, so the whole button warns.
-        let defaults = PanelSettings::default();
-        let update = core.control(Control::Settings(defaults.clone())).unwrap();
+        // Neither CPU row on the bar: the whole button warns.
+        let no_cpu = PanelSettings {
+            top: RowKind::Disk,
+            ..PanelSettings::default()
+        };
+        let update = core.control(Control::Settings(no_cpu.clone())).unwrap();
         assert_eq!(update.panel.bottom.as_deref(), Some("45%"));
-        assert!(
-            update
-                .panel
-                .button_warns(&defaults.shown_rows(defaults.layout))
-        );
+        assert!(update.panel.button_warns(&no_cpu.shown_rows(no_cpu.layout)));
     }
 
     #[test]
@@ -272,6 +292,48 @@ mod tests {
         };
         // The rates were already `None` without a second sample, so nothing changes either.
         assert!(core.control(Control::Settings(hidden_rates)).is_none());
+    }
+
+    #[test]
+    fn nvml_is_wanted_while_open_or_with_gpu_on_the_bar() {
+        let mut core = Core::new(PanelSettings::default());
+        assert_eq!(core.wants(), Wants::default());
+        core.control(Control::PopupOpen(true));
+        assert_eq!(
+            core.wants(),
+            Wants {
+                processes: true,
+                nvml: true
+            }
+        );
+        core.control(Control::PopupOpen(false));
+        core.control(Control::Settings(PanelSettings {
+            bottom: RowKind::Gpu,
+            ..PanelSettings::default()
+        }));
+        assert_eq!(
+            core.wants(),
+            Wants {
+                processes: false,
+                nvml: true
+            }
+        );
+        // Compact shows only the top row.
+        core.control(Control::Settings(PanelSettings {
+            bottom: RowKind::Gpu,
+            layout: Layout::Compact,
+            ..PanelSettings::default()
+        }));
+        assert!(!core.wants().nvml);
+    }
+
+    #[test]
+    fn a_forced_open_tier_stays_open() {
+        let mut core = Core::new(PanelSettings::default()).forced_open(true);
+        assert!(core.wants().processes);
+        core.control(Control::PopupOpen(false));
+        assert!(core.wants().nvml);
+        assert_eq!(core.interval(), INTERVAL);
     }
 
     #[test]

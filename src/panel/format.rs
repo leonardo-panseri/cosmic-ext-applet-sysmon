@@ -22,6 +22,12 @@ pub fn celsius(value: f32) -> String {
     format!("{value:.0}°C")
 }
 
+/// A power draw, rounded to a whole watt: `"64W"`.
+#[must_use]
+pub fn watts(value: f32) -> String {
+    format!("{:.0}W", value.max(0.0))
+}
+
 /// Bytes per second in at most four characters, in powers of 1024: `"999B"`, `"1.2K"`, `"340K"`,
 /// `"12M"`. Negative or non-finite rates show as `"0B"`.
 #[must_use]
@@ -47,6 +53,12 @@ pub fn rate(bytes_per_sec: f64) -> String {
         value /= 1024.0;
     }
     "999P".into()
+}
+
+/// An amount in use, as [`size`] but nothing is `"0"`, as in a suspended GPU's `0 / 8G` (D4).
+#[must_use]
+pub fn used(bytes: u64) -> String {
+    if bytes == 0 { "0".into() } else { size(bytes) }
 }
 
 /// A size in bytes, as [`rate`] writes it but without a trailing `.0`: `"0B"`, `"2.4G"`, `"8G"`,
@@ -80,6 +92,20 @@ mod tests {
     fn celsius_rounds_to_a_whole_degree() {
         assert_eq!(celsius(51.6), "52°C");
         assert_eq!(celsius(100.0), "100°C");
+    }
+
+    #[test]
+    fn watts_round_to_a_whole_watt() {
+        assert_eq!(watts(31.5), "32W");
+        assert_eq!(watts(4.2), "4W");
+        assert_eq!(watts(-1.0), "0W");
+    }
+
+    #[test]
+    fn a_vram_size_in_mib_rounds_to_whole_gibibytes() {
+        // 8188 MiB is 7.996 GiB: "8G", not "7G" (ADR 0003).
+        assert_eq!(size(8188 << 20), "8G");
+        assert_eq!(size(12_282 << 20), "12G");
     }
 
     #[test]

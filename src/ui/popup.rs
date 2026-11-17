@@ -16,7 +16,6 @@ use crate::app::Message;
 use crate::fl;
 use crate::panel::{PanelSettings, format};
 use crate::sampler::stats::{GpuSample, Stats};
-use crate::sources::drm::RuntimeStatus;
 use crate::ui::graph;
 use crate::ui::settings::{self, SettingsModels};
 use sysmon_proto::Process;
@@ -195,7 +194,8 @@ fn memory<'a>(stats: &Stats, settings: &PanelSettings) -> Element<'a, Message> {
     section(fl!("section-memory"), rows)
 }
 
-/// One block per GPU, the NVIDIA cards (named from procfs) first.
+/// One block per GPU, the NVIDIA cards first. A suspended card shows `Suspended`, and its VRAM
+/// as 0 of the size cached the last time it was awake, if ever (D4).
 fn gpus<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> {
     let history = |card: &str| {
         stats
@@ -205,10 +205,8 @@ fn gpus<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> 
             .find(|(c, _)| c == card)
             .map(|(_, h)| h)
     };
-    let mut cards: Vec<&GpuSample> = stats.gpus.iter().collect();
-    cards.sort_by_key(|g| g.name.is_none());
     let mut blocks = Vec::new();
-    for gpu in cards {
+    for gpu in stats.gpus_nvidia_first() {
         blocks.push(gpu_header(gpu, settings));
         if gpu.busy.is_some()
             && let Some(history) = history(&gpu.card)
@@ -228,17 +226,14 @@ fn gpus<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> 
     section(fl!("section-gpu"), blocks)
 }
 
-/// The GPU's name, then "load · temperature", or "Suspended".
+/// The GPU's name, then "load · temperature · power", or "Suspended".
 fn gpu_header<'a>(gpu: &GpuSample, settings: &PanelSettings) -> Element<'a, Message> {
     let name = gpu
         .name
         .clone()
         .unwrap_or_else(|| fl!("gpu-unnamed", card = gpu.card.as_str()));
     let mut values = widget::Row::new().align_y(Alignment::Center);
-    if matches!(
-        gpu.status,
-        RuntimeStatus::Suspended | RuntimeStatus::Suspending
-    ) {
+    if gpu.suspended() {
         values = values.push(muted(widget::text::body(fl!("gpu-suspended"))));
     } else {
         let mut parts: Vec<Element<'a, Message>> = Vec::new();
@@ -253,6 +248,9 @@ fn gpu_header<'a>(gpu: &GpuSample, settings: &PanelSettings) -> Element<'a, Mess
                 )
                 .into(),
             );
+        }
+        if let Some(watts) = gpu.watts {
+            parts.push(widget::text::body(format::watts(watts)).into());
         }
         for (i, part) in parts.into_iter().enumerate() {
             if i > 0 {
@@ -567,10 +565,11 @@ fn interface_icon(name: &str) -> &'static str {
     }
 }
 
+/// "11G / 30G"; nothing used is "0", as a suspended GPU's "0 / 8G" (D4).
 fn used_of_total(used: u64, total: u64) -> String {
     fl!(
         "used-of-total",
-        used = format::size(used),
+        used = format::used(used),
         total = format::size(total)
     )
 }
@@ -611,6 +610,13 @@ mod tests {
         );
         assert_eq!(strip(uptime(Duration::from_mins(5 * 60 + 12))), "up 5h 12m");
         assert_eq!(strip(uptime(Duration::from_secs(12 * 60 + 59))), "up 12m");
+    }
+
+    #[test]
+    fn a_suspended_gpu_s_vram_reads_0_of_the_rounded_total() {
+        let strip = |s: String| s.replace(['\u{2068}', '\u{2069}'], "");
+        assert_eq!(strip(used_of_total(0, 8188 << 20)), "0 / 8G");
+        assert_eq!(strip(used_of_total(512 << 20, 8188 << 20)), "512M / 8G");
     }
 
     #[test]

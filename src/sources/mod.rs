@@ -12,11 +12,12 @@
 pub mod discover;
 pub mod diskstats;
 pub mod drm;
+pub mod gpu_name;
 pub mod hwmon;
 pub mod loadavg;
 pub mod meminfo;
 pub mod net_dev;
-#[allow(dead_code, reason = "`power` is read for the GPU cards in P4")]
+#[allow(dead_code, reason = "`power` isn't shown")]
 pub mod nvidia_procfs;
 pub mod nvme;
 pub mod proc_stat;

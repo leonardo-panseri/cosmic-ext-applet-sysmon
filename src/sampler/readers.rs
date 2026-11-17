@@ -10,25 +10,28 @@
 //! Nothing here opens `/dev`.
 //!
 //! What the sandbox can't see comes from the [`Probe`]: the host's mounts every [`MOUNTS_EVERY`]
-//! in both tiers, the top processes on every open-tier tick (D2). Those calls block this thread
-//! for at most the probe's timeouts.
+//! in both tiers, the top processes on every open-tier tick (D2), and NVIDIA stats through NVML
+//! when the back-off of [`NvmlSchedule`] says so (ADR 0003). Those calls block this thread for at
+//! most the probe's timeouts.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use sysmon_proto::Mount;
+use sysmon_proto::{Mount, NvidiaState, NvmlSample};
 
+use super::nvml_schedule::{IDLE_INTERVAL, NvmlSchedule, Tick};
 use super::stats::{DriveTemp, GpuSample, Sample};
-use crate::probe_client::Probe;
+use crate::config::VramCache;
+use crate::probe_client::{self, Probe};
 use crate::sources::drm::{self, RuntimeStatus};
 use crate::sources::hwmon::{self, ChipTemp};
 use crate::sources::{
-    MAX_DRIVES, MAX_GPUS, clip_name, discover, diskstats, loadavg, meminfo, net_dev, nvidia_procfs,
-    nvme, proc_stat, uptime,
+    MAX_DRIVES, MAX_GPUS, clip_name, discover, diskstats, gpu_name, loadavg, meminfo, net_dev,
+    nvidia_procfs, nvme, proc_stat, uptime,
 };
 
 /// How often devices are looked for again: network interfaces, disks, GPUs, hwmon chips.
@@ -43,6 +46,18 @@ const DRIVE_TEMP_EVERY: Duration = Duration::from_secs(30);
 const MAX_FILE_BYTES: usize = 1 << 20;
 /// Most hwmon chips and DRM entries looked at (D8).
 const MAX_DIR_ENTRIES: usize = 256;
+/// How long an NVML sample is shown on the ticks the back-off skips: one backed-off interval,
+/// plus a battery tick of slack.
+const NVML_HOLD: Duration = IDLE_INTERVAL.saturating_add(Duration::from_secs(5));
+
+/// What the current tier reads beyond the closed tier's files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Wants {
+    /// The top processes: the popup is open.
+    pub processes: bool,
+    /// NVIDIA stats: the popup is open or the panel button shows `gpu` (D2).
+    pub nvml: bool,
+}
 
 /// A file kept open and reread from the start.
 #[derive(Debug)]
@@ -154,6 +169,14 @@ struct AmdFiles {
     vram_total: Option<u64>,
 }
 
+/// What NVIDIA procfs says about a card, without waking it.
+#[derive(Debug, Clone)]
+struct NvidiaIds {
+    /// The PCI address, as the probe reports it.
+    bus_id: String,
+    uuid: Option<String>,
+}
+
 /// A DRM card.
 #[derive(Debug)]
 struct Card {
@@ -161,8 +184,10 @@ struct Card {
     /// The canonical path of its device, to match hwmon chips to it.
     device: PathBuf,
     runtime_status: Option<Pread>,
-    /// From NVIDIA procfs, which never wakes the card.
+    /// From NVIDIA procfs, which never wakes the card, or for AMD looked up when identified.
     model: Option<String>,
+    /// Set for a card the NVIDIA driver lists.
+    nvidia: Option<NvidiaIds>,
     /// Whether the driver was looked at; done once, the first time the card may be queried.
     identified: bool,
     amd: Option<AmdFiles>,
@@ -180,6 +205,7 @@ impl Card {
             device,
             runtime_status,
             model: None,
+            nvidia: None,
             identified: false,
             amd: None,
             chip: None,
@@ -197,14 +223,14 @@ impl Card {
             });
         let mut gpu = GpuSample {
             card: self.name.clone(),
+            nvidia: self.nvidia.is_some(),
             name: self.model.clone(),
+            uuid: self.nvidia.as_ref().and_then(|n| n.uuid.clone()),
             status,
-            busy: None,
-            vram_used: None,
-            vram_total: None,
-            celsius: None,
+            ..GpuSample::default()
         };
-        if !status.may_query() {
+        // An NVIDIA card's stats come from the probe (NVML), never from its PCI device.
+        if !status.may_query() || self.nvidia.is_some() {
             return gpu;
         }
         if !self.identified {
@@ -220,8 +246,8 @@ impl Card {
                 .as_mut()
                 .and_then(|f| f.read().ok().and_then(drm::parse_bytes));
             gpu.vram_total = amd.vram_total;
+            gpu.name.clone_from(&self.model);
         }
-        // Other drivers' stats and hwmon come from the probe (P4).
         if self.amd.is_some()
             && self.chip.is_none()
             && let Some(dir) = self.chip_dir.take()
@@ -234,22 +260,52 @@ impl Card {
         gpu
     }
 
-    /// Looks at the driver. Only called while the card may be queried (D3).
+    /// Looks at the driver, and names an AMD card. Only called while the card may be queried
+    /// (D3), and never for an NVIDIA card.
     fn identify(&mut self) {
         self.identified = true;
         let driver = std::fs::read_link(self.device.join("driver")).ok();
         let driver = driver.as_deref().and_then(Path::file_name);
         if driver.is_some_and(|d| d == "amdgpu") {
             let file = |name: &str| Pread::open(&self.device.join(name));
+            let vram_total = std::fs::read_to_string(self.device.join("mem_info_vram_total"))
+                .ok()
+                .and_then(|t| drm::parse_bytes(&t));
             self.amd = Some(AmdFiles {
                 busy: file("gpu_busy_percent"),
                 vram_used: file("mem_info_vram_used"),
-                vram_total: std::fs::read_to_string(self.device.join("mem_info_vram_total"))
-                    .ok()
-                    .and_then(|t| drm::parse_bytes(&t)),
+                vram_total,
             });
+            self.model = Some(amd_name(&self.device, vram_total));
         }
     }
+}
+
+/// An `amdgpu` card's name: `product_name`, else its `pci.ids` entry, else a generic one. Reads
+/// its vendor and device ids, which is safe for an awake AMD card and never done for NVIDIA.
+fn amd_name(device: &Path, vram_total: Option<u64>) -> String {
+    let read = |name: &str| std::fs::read_to_string(device.join(name)).ok();
+    if let Some(name) = read("product_name").map(|n| clip_name(&n))
+        && !name.is_empty()
+    {
+        return name;
+    }
+    let ids = read("vendor")
+        .and_then(|v| gpu_name::parse_id(&v))
+        .filter(|&v| v == gpu_name::AMD_VENDOR)
+        .zip(read("device").and_then(|d| gpu_name::parse_id(&d)));
+    if let Some((vendor, device_id)) = ids {
+        for path in gpu_name::PCI_IDS_PATHS {
+            if let Ok(file) = File::open(path) {
+                if let Some(name) = gpu_name::lookup(io::BufReader::new(file), vendor, device_id) {
+                    return gpu_name::amd_display_name(&name);
+                }
+                break;
+            }
+        }
+    }
+    let boot_vga = read("boot_vga").is_some_and(|b| b.trim() == "1");
+    gpu_name::amd_generic_name(boot_vga, vram_total).to_owned()
 }
 
 /// An `nvme` drive's hwmon chip.
@@ -274,6 +330,12 @@ pub struct Readers {
     cpu_chip: Option<Chip>,
     drives: Vec<Drive>,
     probe: Box<dyn Probe>,
+    /// When to ask the probe for NVIDIA stats (ADR 0003).
+    nvml: NvmlSchedule,
+    /// The last NVML sample of each card, by bus id, and when it was taken: shown on the ticks
+    /// the back-off skips.
+    nvml_samples: HashMap<String, (Instant, NvmlSample)>,
+    vram: VramCache,
     /// The last mounts and when they were asked for.
     mounts: Option<(Instant, Vec<Mount>)>,
     /// The last drive temperatures and when they were read.
@@ -284,9 +346,9 @@ pub struct Readers {
 }
 
 impl Readers {
-    /// Readers that ask `probe` for what the sandbox can't see.
+    /// Readers that ask `probe` for what the sandbox can't see, remembering VRAM sizes in `vram`.
     #[must_use]
-    pub fn new(probe: Box<dyn Probe>) -> Self {
+    pub fn new(probe: Box<dyn Probe>, vram: VramCache) -> Self {
         Self {
             stat: None,
             meminfo: None,
@@ -300,6 +362,9 @@ impl Readers {
             cpu_chip: None,
             drives: Vec::new(),
             probe,
+            nvml: NvmlSchedule::default(),
+            nvml_samples: HashMap::new(),
+            vram,
             mounts: None,
             drive_temps: None,
             discovered_at: None,
@@ -307,8 +372,8 @@ impl Readers {
         }
     }
 
-    /// Reads one sample at `now`; with the top processes when `open` (the open tier).
-    pub fn read(&mut self, now: Instant, open: bool) -> Sample {
+    /// Reads one sample at `now`, with what the tier `wants`.
+    pub fn read(&mut self, now: Instant, wants: Wants) -> Sample {
         let due = self
             .discovered_at
             .is_none_or(|at| now.duration_since(at) >= REDISCOVER_EVERY);
@@ -362,10 +427,86 @@ impl Readers {
         };
         // After the counters, so a slow probe doesn't skew the rates measured from `now`.
         sample.mounts = self.mounts(now);
-        if open {
+        if wants.processes {
             sample.processes = self.probe.processes();
         }
+        self.nvidia(now, wants.nvml, &mut sample.gpus);
         sample
+    }
+
+    /// Fills in the NVIDIA cards of `gpus`: asks the probe when the back-off says so, shows the
+    /// last sample on the ticks in between, and the cached VRAM size while suspended (D4).
+    fn nvidia(&mut self, now: Instant, wanted: bool, gpus: &mut [GpuSample]) {
+        let tick = Tick {
+            now,
+            awake: gpus.iter().any(|g| g.nvidia && g.status.may_query()),
+            wanted,
+        };
+        if self.nvml.due(tick) {
+            let backed_off = self.nvml.backed_off();
+            let reply = self.probe.nvidia().unwrap_or_default();
+            let mut load = None;
+            for gpu in reply {
+                if let NvidiaState::Sampled(sample) = gpu.state {
+                    load = load.max(sample.util);
+                    if let Some(total) = sample.vram_total
+                        && let Some(uuid) = sample.uuid.as_deref().or_else(|| {
+                            self.cards
+                                .iter()
+                                .filter_map(|c| c.nvidia.as_ref())
+                                .find(|n| n.bus_id == gpu.bus_id)
+                                .and_then(|n| n.uuid.as_deref())
+                        })
+                    {
+                        self.vram.remember(uuid, total);
+                    }
+                    self.nvml_samples.insert(gpu.bus_id, (now, sample));
+                } else {
+                    self.nvml_samples.remove(&gpu.bus_id);
+                }
+            }
+            self.nvml.record(now, load);
+            if probe_client::debug() {
+                let schedule = match (backed_off, self.nvml.backed_off()) {
+                    (false, true) => "backing off to every 15 s",
+                    (true, false) => "load: back to every tick",
+                    (true, true) => "backed off",
+                    (false, false) => "every tick",
+                };
+                eprintln!(
+                    "[{}] nvml: asked, load {load:?}; {schedule}",
+                    probe_client::stamp()
+                );
+            }
+        }
+        for (card, gpu) in self.cards.iter().zip(gpus.iter_mut()) {
+            let Some(ids) = &card.nvidia else {
+                continue;
+            };
+            if gpu.suspended() {
+                self.nvml_samples.remove(&ids.bus_id);
+                if let Some(total) = ids.uuid.as_deref().and_then(|u| self.vram.get(u)) {
+                    gpu.vram_used = Some(0);
+                    gpu.vram_total = Some(total);
+                }
+                continue;
+            }
+            let Some((_, sample)) = self
+                .nvml_samples
+                .get(&ids.bus_id)
+                .filter(|(at, _)| now.saturating_duration_since(*at) <= NVML_HOLD)
+            else {
+                continue;
+            };
+            if gpu.name.is_none() {
+                gpu.name.clone_from(&sample.name);
+            }
+            gpu.busy = sample.util;
+            gpu.celsius = sample.celsius;
+            gpu.watts = sample.watts;
+            gpu.vram_used = sample.vram_used;
+            gpu.vram_total = sample.vram_total;
+        }
     }
 
     /// The drives' temperatures, reread every [`DRIVE_TEMP_EVERY`].
@@ -476,6 +617,10 @@ impl Readers {
                     .is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(&bus))
             }) {
                 card.model = Some(info.model);
+                card.nvidia = Some(NvidiaIds {
+                    bus_id: bus.to_ascii_lowercase(),
+                    uuid: info.uuid,
+                });
             }
         }
     }
@@ -563,24 +708,145 @@ mod tests {
             Some(match request {
                 Request::Processes { .. } => Reply::Processes(TopProcesses::default()),
                 Request::Mounts => Reply::Mounts { mounts: vec![] },
-                Request::Gpus { .. } => Reply::Unsupported,
+                Request::Gpus { .. } => Reply::Gpus { gpus: vec![] },
                 Request::Release => Reply::Released,
             })
         }
     }
 
+    /// The open tier without NVML, so these tests never ask about this machine's GPU.
+    const OPEN: Wants = Wants {
+        processes: true,
+        nvml: false,
+    };
+
+    /// A probe whose one NVIDIA card at `0000:01:00.0` answers with `util`; counts the asks.
+    #[derive(Debug, Clone, Default)]
+    struct FakeNvidia {
+        util: Arc<Mutex<u8>>,
+        asked: Arc<Mutex<u32>>,
+    }
+
+    impl Probe for FakeNvidia {
+        fn ask(&mut self, request: Request) -> Option<Reply> {
+            assert_eq!(request, Request::Gpus { nvml: true });
+            *self.asked.lock().unwrap() += 1;
+            Some(Reply::Gpus {
+                gpus: vec![sysmon_proto::NvidiaGpu {
+                    bus_id: "0000:01:00.0".into(),
+                    state: NvidiaState::Sampled(NvmlSample {
+                        uuid: Some("GPU-1".into()),
+                        name: Some("NVML name".into()),
+                        util: Some(*self.util.lock().unwrap()),
+                        celsius: Some(52.0),
+                        watts: Some(31.5),
+                        vram_used: Some(512 << 20),
+                        vram_total: Some(8188 << 20),
+                    }),
+                }],
+            })
+        }
+    }
+
+    #[test]
+    fn nvidia_stats_come_from_the_probe_and_vram_from_the_cache_while_suspended() {
+        let dir = std::env::temp_dir().join(format!("sysmon-readers-nv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("power")).unwrap();
+        let status = dir.join("power/runtime_status");
+        std::fs::write(&status, "suspended\n").unwrap();
+
+        let probe = FakeNvidia::default();
+        let mut readers = Readers::new(Box::new(probe.clone()), VramCache::default());
+        let mut card = Card::new("card0".into(), dir.clone());
+        card.model = Some("NVIDIA GeForce RTX 4060 Laptop GPU".into());
+        card.nvidia = Some(NvidiaIds {
+            bus_id: "0000:01:00.0".into(),
+            uuid: Some("GPU-1".into()),
+        });
+        readers.cards.push(card);
+        let tick = |readers: &mut Readers, at: Instant, wanted: bool| {
+            let mut failed = false;
+            let mut gpus: Vec<_> = readers
+                .cards
+                .iter_mut()
+                .map(|c| c.sample(&mut failed))
+                .collect();
+            readers.nvidia(at, wanted, &mut gpus);
+            gpus.remove(0)
+        };
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+
+        // Suspended and never seen awake: only `Suspended`, and nothing asked.
+        let gpu = tick(&mut readers, t0, true);
+        assert!(gpu.suspended() && gpu.nvidia);
+        assert_eq!((gpu.vram_used, gpu.vram_total), (None, None));
+        assert_eq!(*probe.asked.lock().unwrap(), 0);
+
+        // Awake but nobody looking: nothing asked either.
+        std::fs::write(&status, "active\n").unwrap();
+        let gpu = tick(&mut readers, t0 + s(2), false);
+        assert_eq!(gpu.busy, None);
+        assert_eq!(*probe.asked.lock().unwrap(), 0);
+
+        // Awake and looked at: NVML's numbers, the procfs name.
+        *probe.util.lock().unwrap() = 40;
+        let gpu = tick(&mut readers, t0 + s(4), true);
+        assert_eq!(
+            (
+                gpu.busy,
+                gpu.celsius,
+                gpu.watts,
+                gpu.vram_used,
+                gpu.vram_total
+            ),
+            (
+                Some(40),
+                Some(52.0),
+                Some(31.5),
+                Some(512 << 20),
+                Some(8188 << 20)
+            )
+        );
+        assert_eq!(
+            gpu.name.as_deref(),
+            Some("NVIDIA GeForce RTX 4060 Laptop GPU")
+        );
+
+        // Idle: three samples, then the last one is shown on the skipped ticks.
+        *probe.util.lock().unwrap() = 0;
+        for i in 0..4 {
+            tick(&mut readers, t0 + s(6 + 2 * i), true);
+        }
+        assert_eq!(*probe.asked.lock().unwrap(), 4);
+        let gpu = tick(&mut readers, t0 + s(14), true);
+        assert_eq!(gpu.busy, Some(0));
+        assert_eq!(*probe.asked.lock().unwrap(), 4);
+
+        // Suspended: `0 / 8G` from the cache, and the held sample is dropped.
+        std::fs::write(&status, "suspended\n").unwrap();
+        let gpu = tick(&mut readers, t0 + s(16), true);
+        assert_eq!(
+            (gpu.busy, gpu.vram_used, gpu.vram_total),
+            (None, Some(0), Some(8188 << 20))
+        );
+        assert_eq!(*probe.asked.lock().unwrap(), 4);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn mounts_every_30_s_in_both_tiers_and_processes_only_while_open() {
         let recorder = Recorder::default();
-        let mut readers = Readers::new(Box::new(recorder.clone()));
+        let mut readers = Readers::new(Box::new(recorder.clone()), VramCache::default());
         let t0 = Instant::now();
         let s = Duration::from_secs;
-        let closed = readers.read(t0, false);
+        let closed = readers.read(t0, Wants::default());
         assert!(closed.processes.is_none());
-        readers.read(t0 + s(2), false);
-        let open = readers.read(t0 + s(4), true);
+        readers.read(t0 + s(2), Wants::default());
+        let open = readers.read(t0 + s(4), OPEN);
         assert!(open.processes.is_some());
-        readers.read(t0 + s(30), false);
+        readers.read(t0 + s(30), Wants::default());
         assert_eq!(
             *recorder.0.lock().unwrap(),
             [
@@ -593,8 +859,8 @@ mod tests {
 
     #[test]
     fn without_a_probe_there_are_no_mounts_or_processes() {
-        let mut readers = Readers::new(Box::new(Unavailable));
-        let sample = readers.read(Instant::now(), true);
+        let mut readers = Readers::new(Box::new(Unavailable), VramCache::default());
+        let sample = readers.read(Instant::now(), OPEN);
         assert_eq!(sample.mounts, []);
         assert!(sample.processes.is_none());
     }
@@ -628,8 +894,8 @@ mod tests {
 
     #[test]
     fn reads_this_machine_s_procfs() {
-        let mut readers = Readers::new(Box::new(Unavailable));
-        let sample = readers.read(Instant::now(), false);
+        let mut readers = Readers::new(Box::new(Unavailable), VramCache::default());
+        let sample = readers.read(Instant::now(), Wants::default());
         assert!(sample.stat.is_some_and(|s| !s.cores.is_empty()));
         assert!(sample.mem.is_some());
         assert!(sample.load.is_some());

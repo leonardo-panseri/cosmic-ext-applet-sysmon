@@ -38,7 +38,7 @@ stat-separator = {" · "}
 # Used of total: "11G / 30G".
 used-of-total = { $used } / { $total }
 gpu-suspended = Suspended
-# A GPU whose model isn't known without waking it or a lookup table: "GPU card1".
+# A GPU whose model isn't known (not NVIDIA or AMD): "GPU card1".
 gpu-unnamed = GPU { $card }
 download-label = Download
 upload-label = Upload

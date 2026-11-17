@@ -12,10 +12,12 @@
 
 pub mod core;
 pub mod history;
+pub mod nvml_schedule;
 pub mod rates;
 pub mod readers;
 pub mod stats;
 
+use std::fmt::Write;
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -24,7 +26,9 @@ use cosmic::iced::futures::channel::mpsc as async_mpsc;
 use self::core::Core;
 pub use self::core::{Control, Update};
 use self::readers::Readers;
-use crate::panel::PanelSettings;
+use self::stats::Stats;
+use crate::config::VramCache;
+use crate::panel::{PanelSettings, format};
 use crate::probe_client;
 
 /// The UI's end of the control channel.
@@ -48,7 +52,10 @@ pub fn spawn(settings: PanelSettings) -> (SamplerHandle, async_mpsc::UnboundedRe
     let (update_tx, update_rx) = async_mpsc::unbounded();
     std::thread::Builder::new()
         .name("sysmon-sampler".into())
-        .spawn(move || run(Core::new(settings), &control_rx, &update_tx))
+        .spawn(move || {
+            let core = Core::new(settings).forced_open(probe_client::debug_open());
+            run(core, &control_rx, &update_tx);
+        })
         .expect("failed to start the sampler thread");
     (SamplerHandle(control_tx), update_rx)
 }
@@ -58,13 +65,20 @@ fn run(
     control: &mpsc::Receiver<Control>,
     updates: &async_mpsc::UnboundedSender<Update>,
 ) {
-    let mut readers = Readers::new(probe_client::connect());
+    let vram = VramCache::open(<crate::app::AppModel as cosmic::Application>::APP_ID);
+    let mut readers = Readers::new(probe_client::connect(), vram);
     readers.debug_probe();
     loop {
         let now = Instant::now();
         let deadline = core.deadline(now);
         let update = if deadline <= now {
-            core.sample(readers.read(now, core.popup_open()), now)
+            let update = core.sample(readers.read(now, core.wants()), now);
+            if probe_client::debug_open()
+                && let Some(update) = &update
+            {
+                log_gpus(&update.stats);
+            }
+            update
         } else {
             match control.recv_timeout(deadline - now) {
                 Ok(message) => core.control(message),
@@ -77,5 +91,36 @@ fn run(
         {
             return;
         }
+    }
+}
+
+/// With `SYSMON_DEBUG_OPEN`, one line per GPU of each sample.
+fn log_gpus(stats: &Stats) {
+    let stamp = probe_client::stamp();
+    for gpu in stats.gpus_nvidia_first() {
+        let mut line = format!(
+            "[{stamp}] gpu {} {:?} {:?}",
+            gpu.card,
+            gpu.name.as_deref().unwrap_or("?"),
+            gpu.status
+        );
+        if let Some(busy) = gpu.busy {
+            let _ = write!(line, " util {busy}%");
+        }
+        if let Some(c) = gpu.celsius {
+            let _ = write!(line, " {}", format::celsius(c));
+        }
+        if let Some(w) = gpu.watts {
+            let _ = write!(line, " {w:.1}W");
+        }
+        if let (Some(used), Some(total)) = (gpu.vram_used, gpu.vram_total) {
+            let _ = write!(
+                line,
+                " VRAM {} / {}",
+                format::used(used),
+                format::size(total)
+            );
+        }
+        eprintln!("{line}");
     }
 }

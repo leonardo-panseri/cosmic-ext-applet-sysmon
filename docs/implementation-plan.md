@@ -89,7 +89,7 @@ The VRAM size can't be read without waking the card. `/proc/driver/nvidia/gpus/*
 and UUID but not the memory size. PCI BAR1 is 8192 MiB here, but only because Resizable BAR is on. Without
 ReBAR it's 256 MiB, and ReBAR sizes are powers of two, so a 12 GB card would show 16 GB. Rejected as a source.
 
-Instead, the first time the card is seen awake, store `uuid → vram_total` in cosmic-config state. While suspended,
+Instead, the first time the card is seen awake, store `uuid → vram_total` in cosmic-config state. (In a Flatpak that's the app's own `~/.var/app/<id>/.local/state`, since `--filesystem` has no `xdg-state` location; no extra permission needed.) While suspended,
 the GPU card shows:
 
 ```

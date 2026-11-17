@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub use self::spawned::Spawned;
-use sysmon_proto::{MAX_TOP, Mount, Reply, Request, TopProcesses};
+use sysmon_proto::{MAX_TOP, Mount, NvidiaGpu, Reply, Request, TopProcesses};
 
 /// How long the probe has to start and say hello: `flatpak-spawn` is a D-Bus round trip.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -58,6 +58,16 @@ pub trait Probe: Send + std::fmt::Debug {
             _ => None,
         }
     }
+
+    /// The NVIDIA GPUs, each awake one sampled through NVML. Every call wakes an awake card's
+    /// idle timer, so only the back-off of ADR 0003 decides when to call it. `None` from a
+    /// probe that doesn't know NVML.
+    fn nvidia(&mut self) -> Option<Vec<NvidiaGpu>> {
+        match self.ask(Request::Gpus { nvml: true })? {
+            Reply::Gpus { gpus } => Some(gpus),
+            _ => None,
+        }
+    }
 }
 
 /// The probe for this environment: [`Spawned`] on the host from a Flatpak, otherwise
@@ -70,19 +80,24 @@ pub fn connect() -> Box<dyn Probe> {
                 eprintln!("probe: no app-path in /.flatpak-info; no host processes or mounts");
                 return Box::new(Unavailable);
             };
-            Box::new(Spawned::new(host_command(&app_path), HANDSHAKE_TIMEOUT))
+            Box::new(Spawned::new(
+                host_command(&app_path, debug()),
+                HANDSHAKE_TIMEOUT,
+            ))
         }
         Err(_) => Box::new(InProcess::default()),
     }
 }
 
-/// `flatpak-spawn --host --watch-bus <app_path>/bin/sysmon-probe`.
-fn host_command(app_path: &Path) -> Command {
+/// `flatpak-spawn --host --watch-bus <app_path>/bin/sysmon-probe`; with `debug`, the probe
+/// gets `SYSMON_DEBUG=1` so it logs slow NVML samples.
+fn host_command(app_path: &Path, debug: bool) -> Command {
     let mut command = Command::new("flatpak-spawn");
-    command
-        .arg("--host")
-        .arg("--watch-bus")
-        .arg(app_path.join("bin/sysmon-probe"));
+    command.arg("--host").arg("--watch-bus");
+    if debug {
+        command.arg("--env=SYSMON_DEBUG=1");
+    }
+    command.arg(app_path.join("bin/sysmon-probe"));
     command
 }
 
@@ -106,8 +121,16 @@ pub fn flatpak_app_path(info: &str) -> Option<PathBuf> {
 }
 
 /// Outside a Flatpak: the probe's logic, called on this thread.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InProcess(sysmon_probe::Host);
+
+impl Default for InProcess {
+    fn default() -> Self {
+        Self(sysmon_probe::Host::with_gpus(
+            sysmon_probe::nvidia::Gpus::new(debug()),
+        ))
+    }
+}
 
 impl Probe for InProcess {
     fn ask(&mut self, request: Request) -> Option<Reply> {
@@ -128,11 +151,29 @@ impl Probe for Unavailable {
 static LOGGED_PROCESSES: AtomicBool = AtomicBool::new(false);
 static LOGGED_MOUNTS: AtomicBool = AtomicBool::new(false);
 
-/// Whether `SYSMON_DEBUG` is set: the first reply of each kind is logged, and the sampler asks
-/// for the processes once at start, so a closed popup can be checked too.
+/// Whether `SYSMON_DEBUG` (or [`debug_open`]) is set: the first reply of each kind is logged,
+/// the sampler asks for the processes once at start, so a closed popup can be checked too, and
+/// each NVML request is logged.
 #[must_use]
 pub fn debug() -> bool {
-    std::env::var_os("SYSMON_DEBUG").is_some()
+    std::env::var_os("SYSMON_DEBUG").is_some() || debug_open()
+}
+
+/// Whether `SYSMON_DEBUG_OPEN` is set: the sampler stays in the open tier as if the popup were
+/// open, and logs the GPUs of every sample, to check the GPU path without clicking.
+#[must_use]
+pub fn debug_open() -> bool {
+    std::env::var_os("SYSMON_DEBUG_OPEN").is_some()
+}
+
+/// The wall-clock time for debug logs, as `date +%s.%3N` prints it, to line them up with other
+/// logs.
+#[must_use]
+pub fn stamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:03}", now.as_secs(), now.subsec_millis())
 }
 
 /// Logs the first reply of a kind when [`debug`].
@@ -163,10 +204,22 @@ mod tests {
 
     #[test]
     fn the_host_command_runs_the_installed_probe_and_dies_with_the_applet() {
-        let command = host_command(Path::new("/x/files"));
+        let command = host_command(Path::new("/x/files"), false);
         assert_eq!(command.get_program(), "flatpak-spawn");
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["--host", "--watch-bus", "/x/files/bin/sysmon-probe"]);
+        // Debug logs, but still no arguments to the probe itself.
+        let command = host_command(Path::new("/x/files"), true);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "--host",
+                "--watch-bus",
+                "--env=SYSMON_DEBUG=1",
+                "/x/files/bin/sysmon-probe"
+            ]
+        );
     }
 
     #[test]

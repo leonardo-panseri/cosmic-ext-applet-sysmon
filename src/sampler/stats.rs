@@ -46,20 +46,35 @@ pub struct DriveTemp {
     pub limit: Option<f32>,
 }
 
-/// One DRM card. Everything but `status` is `None` unless the card [may be
-/// queried](RuntimeStatus::may_query) (D3).
-#[derive(Debug, Clone, PartialEq)]
+/// One DRM card. Its stats are `None` unless the card [may be queried](RuntimeStatus::may_query)
+/// (D3), except an NVIDIA card's VRAM while suspended: 0 used of the cached total (D4).
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct GpuSample {
     /// The DRM card, e.g. `card1`.
     pub card: String,
-    /// The model, when the driver says it without waking the card (NVIDIA procfs).
+    /// Driven by the NVIDIA driver; listed first (§2.2).
+    pub nvidia: bool,
+    /// The model: from NVIDIA procfs, which never wakes the card, or for AMD from sysfs and
+    /// `pci.ids`, looked up once.
     pub name: Option<String>,
+    /// NVIDIA's `GPU-…` id, from procfs; keys the VRAM cache (D4).
+    pub uuid: Option<String>,
     pub status: RuntimeStatus,
-    /// Load in percent (amdgpu `gpu_busy_percent`).
+    /// Load in percent (amdgpu `gpu_busy_percent`, NVML utilisation).
     pub busy: Option<u8>,
     pub vram_used: Option<u64>,
     pub vram_total: Option<u64>,
     pub celsius: Option<f32>,
+    /// Board power draw, W (NVML).
+    pub watts: Option<f32>,
+}
+
+impl GpuSample {
+    /// Whether it shows as suspended: not awake, and so not queried.
+    #[must_use]
+    pub fn suspended(&self) -> bool {
+        !self.status.may_query()
+    }
 }
 
 /// `part` as a percentage of `whole`.
@@ -151,11 +166,17 @@ impl Stats {
             .and_then(Mount::used_percent)
     }
 
-    /// The first GPU that may be queried and reports a load: the one `gpu` on the panel shows.
+    /// The GPUs, NVIDIA cards first (§2.2), otherwise in card order.
+    pub fn gpus_nvidia_first(&self) -> impl Iterator<Item = &GpuSample> {
+        let nvidia = self.gpus.iter().filter(|g| g.nvidia);
+        nvidia.chain(self.gpus.iter().filter(|g| !g.nvidia))
+    }
+
+    /// The first GPU, NVIDIA first, that may be queried and reports a load: the one `gpu` on the
+    /// panel shows. A suspended NVIDIA card is skipped for the integrated GPU.
     #[must_use]
     pub fn first_awake_gpu(&self) -> Option<&GpuSample> {
-        self.gpus
-            .iter()
+        self.gpus_nvidia_first()
             .find(|g| g.status.may_query() && g.busy.is_some())
     }
 }
@@ -345,12 +366,9 @@ mod tests {
     fn gpu(card: &str, status: RuntimeStatus, busy: Option<u8>) -> GpuSample {
         GpuSample {
             card: card.into(),
-            name: None,
             status,
             busy,
-            vram_used: None,
-            vram_total: None,
-            celsius: None,
+            ..GpuSample::default()
         }
     }
 
@@ -505,6 +523,28 @@ mod tests {
             [("card0", vec![0.0, 0.0]), ("card1", vec![30.0, 40.0])]
         );
         assert_eq!(stats.first_awake_gpu().unwrap().card, "card1");
+    }
+
+    #[test]
+    fn the_panel_s_gpu_is_the_first_awake_one_nvidia_first() {
+        let nvidia = |status, busy| GpuSample {
+            nvidia: true,
+            ..gpu("card1", status, busy)
+        };
+        let amd = gpu("card0", RuntimeStatus::Active, Some(12));
+        let stats = |gpus| Stats {
+            gpus,
+            ..Stats::default()
+        };
+        let awake = stats(vec![amd.clone(), nvidia(RuntimeStatus::Active, Some(60))]);
+        assert_eq!(awake.first_awake_gpu().unwrap().card, "card1");
+        let order: Vec<_> = awake.gpus_nvidia_first().map(|g| g.card.as_str()).collect();
+        assert_eq!(order, ["card1", "card0"]);
+        // Suspended, or awake without stats (not asked yet): the iGPU.
+        for status in [RuntimeStatus::Suspended, RuntimeStatus::Active] {
+            let stats = stats(vec![amd.clone(), nvidia(status, None)]);
+            assert_eq!(stats.first_awake_gpu().unwrap().card, "card0");
+        }
     }
 
     #[test]

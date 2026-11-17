@@ -54,3 +54,6 @@ Option (b), with a back-off:
 - The plan's P4 check ("the card suspends again within its normal delay with the popup open") holds
   with the back-off; expect up to about 20 s at 2 s (to see 3 idle samples), then the card's own delay.
 - While the card idles awake, its graph updates only every 15 s.
+- A card whose `runtime_status` is `unsupported` (runtime PM off) never suspends, so it counts as awake.
+- On 2 s ticks the 15 s idle interval works out to 16 s. A light vsync'd load can read 0 %, so the
+  back-off may start while it still runs; that's the rule working as intended.
