@@ -158,26 +158,38 @@ impl Chip {
 /// show (ACPI zones, DIMMs, batteries, a second CPU socket, …).
 #[must_use]
 pub fn classify(chip: &Chip) -> Option<ChipTemp> {
+    classify_sensor(chip).map(|(_, temp)| temp)
+}
+
+/// As [`classify`], with the sensor the temperature comes from, so the sampler can reread only
+/// that sensor's `temp<index>_input` (an `nvme` read is a command to the drive).
+#[must_use]
+pub fn classify_sensor(chip: &Chip) -> Option<(&TempSensor, ChipTemp)> {
     match chip.name.as_str() {
         // Tctl carries a fan-control offset on some Ryzens; Tdie, when present, is the real one.
         "k10temp" | "zenpower" => chip
             .labelled("Tdie")
             .or_else(|| chip.labelled("Tctl"))
             .or_else(|| chip.sole_unlabelled())
-            .map(|t| ChipTemp::CpuPackage(t.input)),
+            .map(|t| (t, ChipTemp::CpuPackage(t.input))),
         "coretemp" => chip
             .labelled("Package id 0")
-            .map(|t| ChipTemp::CpuPackage(t.input)),
+            .map(|t| (t, ChipTemp::CpuPackage(t.input))),
         "amdgpu" => chip
             .labelled("edge")
             .or_else(|| chip.sole_unlabelled())
-            .map(|t| ChipTemp::AmdGpu(t.input)),
+            .map(|t| (t, ChipTemp::AmdGpu(t.input))),
         "nvme" => chip
             .labelled("Composite")
             .or_else(|| chip.sole_unlabelled())
-            .map(|t| ChipTemp::Nvme {
-                celsius: t.input,
-                limit: t.max.or(t.crit),
+            .map(|t| {
+                (
+                    t,
+                    ChipTemp::Nvme {
+                        celsius: t.input,
+                        limit: t.max.or(t.crit),
+                    },
+                )
             }),
         _ => None,
     }
@@ -235,6 +247,14 @@ mod tests {
                 limit: Some(83.85)
             })
         );
+    }
+
+    #[test]
+    fn classify_sensor_names_the_sensor_to_reread() {
+        let chip = chip("hwmon4_nvme");
+        let (sensor, _) = classify_sensor(&chip).unwrap();
+        assert_eq!(sensor.index, 1);
+        assert_eq!(sensor.label.as_deref(), Some("Composite"));
     }
 
     #[test]

@@ -52,7 +52,8 @@ a D-Bus round trip plus a host shell reading every `/proc/<pid>/stat`, on every 
 | Interval | 2 s (4 s on battery) | 2 s |
 | CPU total + per core, memory, load, uptime | ✓ (one read each) | ✓ |
 | Net and disk I/O counters | ✓ (feed history) | ✓ |
-| hwmon temps (CPU, AMD GPU, NVMe) | ✓ (warnings need them) | ✓ |
+| hwmon temps (CPU, AMD GPU) | ✓ (warnings need them) | ✓ |
+| NVMe temps (each read is a SMART command) | every 30 s | every 30 s |
 | AMD iGPU sysfs | ✓ | ✓ |
 | dGPU `runtime_status` | ✓ (one small read) | ✓ |
 | dGPU NVML (only when `active`) | only if `gpu` is on the bar | ✓ |

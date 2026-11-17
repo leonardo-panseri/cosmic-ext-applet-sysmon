@@ -148,3 +148,8 @@ tag version:
     git commit -m 'release: {{version}}'
     git tag -a {{version}} -m ''
 
+
+# Measures a running applet's CPU time, wakeups (context switches, per thread) and card0's power
+# state: `just measure [PID] [SECONDS]`, by default the running applet for 600 s
+measure *args:
+    python3 -I tools/measure.py {{args}}
