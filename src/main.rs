@@ -2,6 +2,9 @@
 
 mod app;
 mod i18n;
+// The sampler (P1) is the first user; until then only the tests call into it.
+#[allow(dead_code)]
+mod sources;
 
 fn main() -> cosmic::iced::Result {
     // Get the system's preferred languages.

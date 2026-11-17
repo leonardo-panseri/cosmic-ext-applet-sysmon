@@ -1,0 +1,11 @@
+Model: 		 NVIDIA GeForce RTX 4060 Laptop GPU
+IRQ:   		 114
+GPU UUID: 	 GPU-6e9f6c15-581b-4f11-c568-db1698fe7502
+Video BIOS: 	 95.07.24.00.08
+Bus Type: 	 PCI
+DMA Size: 	 47 bits
+DMA Mask: 	 0x7fffffffffff
+Bus Location: 	 0000:01:00.0
+Device Minor: 	 0
+GPU Firmware: 	 620.70.06
+GPU Excluded:	 No
