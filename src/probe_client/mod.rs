@@ -9,10 +9,11 @@
 //!
 //! Calls block, so they belong on the sampler thread, never in `update()`. A spawned probe is
 //! started on the first call and kept until the applet exits (its stdin closes, and
-//! `--watch-bus` kills it if the applet dies). If it can't start, fails the handshake (another
-//! protocol version, a host glibc older than 2.34, NixOS…), or stops answering within
-//! [`REPLY_TIMEOUT`], that is logged once and every later call returns `None` at once: the applet
-//! goes on with what the sandbox can see and never retries in a loop (ADR 0002).
+//! `--watch-bus` kills it if the applet dies). If it can't start or fails the handshake (another
+//! protocol version, a host glibc older than 2.34, NixOS…), that is logged once and every later
+//! call returns `None` at once: the applet goes on with what the sandbox can see and never
+//! retries in a loop (ADR 0002). Missing [`REPLY_TIMEOUT`] or exiting after a good handshake is
+//! transient: [`Spawned`] starts a new probe after a backoff, and gives up after a few in a row.
 
 mod spawned;
 
