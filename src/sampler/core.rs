@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::readers::Wants;
 use super::stats::{Sample, Stats, Tracker};
-use crate::panel::{Layout, PanelSettings, PanelSummary, RowKind};
+use crate::panel::{Layout, PanelHysteresis, PanelSettings, PanelSummary, RowKind};
 
 /// The sampling interval, in both tiers (D2).
 pub const INTERVAL: Duration = Duration::from_secs(2);
@@ -54,8 +54,8 @@ pub struct Core {
     on_battery: bool,
     /// When the last sample was taken, and its update.
     last: Option<(Instant, Update)>,
-    /// The panel summary the UI has.
-    sent: Option<PanelSummary>,
+    /// The panel summary the UI has, and when its sample was taken.
+    sent: PanelHysteresis,
 }
 
 impl Core {
@@ -69,7 +69,7 @@ impl Core {
             force_open: false,
             on_battery: false,
             last: None,
-            sent: None,
+            sent: PanelHysteresis::default(),
         }
     }
 
@@ -119,7 +119,8 @@ impl Core {
     }
 
     /// Takes in the `sample` taken at `at`. Returns the update to send: every sample while the
-    /// popup is open, otherwise only one that changes what the panel button shows.
+    /// popup is open, otherwise only one that moves what the panel button shows enough
+    /// ([`PanelHysteresis::worth_sending`]).
     pub fn sample(&mut self, sample: Sample, at: Instant) -> Option<Update> {
         let stats = self.tracker.ingest(sample, at);
         let update = Update {
@@ -127,7 +128,8 @@ impl Core {
             stats: Arc::new(stats),
         };
         self.last = Some((at, update.clone()));
-        (self.popup_open || self.sent.as_ref() != Some(&update.panel)).then(|| self.send(update))
+        (self.popup_open || self.sent.worth_sending(&update.panel, at))
+            .then(|| self.send(update, at))
     }
 
     /// Applies `control`. Opening the popup returns the last update right away, so the popup has
@@ -140,8 +142,9 @@ impl Core {
                 let open = open || self.force_open;
                 let opened = open && !self.popup_open;
                 self.popup_open = open;
-                let last = self.last.as_ref().map(|(_, update)| update.clone());
-                last.filter(|_| opened).map(|update| self.send(update))
+                let last = self.last.clone();
+                last.filter(|_| opened)
+                    .map(|(at, update)| self.send(update, at))
             }
             Control::OnBattery(on_battery) => {
                 self.on_battery = on_battery;
@@ -159,7 +162,7 @@ impl Core {
     }
 
     /// The last sample's update under the current settings and layout, if that changes what
-    /// the panel button shows.
+    /// the panel button shows at all: no hysteresis for a change the user made.
     fn redo(&mut self) -> Option<Update> {
         let (at, last) = self.last.take()?;
         let update = Update {
@@ -167,11 +170,14 @@ impl Core {
             stats: last.stats,
         };
         self.last = Some((at, update.clone()));
-        (self.sent.as_ref() != Some(&update.panel)).then(|| self.send(update))
+        self.sent
+            .differs(&update.panel)
+            .then(|| self.send(update, at))
     }
 
-    fn send(&mut self, update: Update) -> Update {
-        self.sent = Some(update.panel.clone());
+    /// Records that `update`, of the sample taken at `at`, is sent.
+    fn send(&mut self, update: Update, at: Instant) -> Update {
+        self.sent.sent(update.panel.clone(), at);
         update
     }
 }
@@ -197,15 +203,53 @@ mod tests {
     }
 
     #[test]
-    fn closed_tier_sends_only_what_changes_the_panel() {
+    fn closed_tier_sends_only_what_moves_the_panel_enough() {
         let mut core = Core::new(PanelSettings::default());
         let t0 = Instant::now();
         assert_eq!(bottom(core.sample(memory(45), t0)).as_deref(), Some("45%"));
         assert!(core.sample(memory(45), t0 + INTERVAL).is_none());
+        // One point is under the threshold: the panel keeps showing 45 %.
+        assert!(core.sample(memory(46), t0 + 2 * INTERVAL).is_none());
         assert_eq!(
-            bottom(core.sample(memory(46), t0 + 2 * INTERVAL)).as_deref(),
-            Some("46%")
+            bottom(core.sample(memory(47), t0 + 3 * INTERVAL)).as_deref(),
+            Some("47%")
         );
+    }
+
+    #[test]
+    fn closed_tier_catches_up_with_a_held_value() {
+        let mut core = Core::new(PanelSettings::default());
+        let t0 = Instant::now();
+        core.sample(memory(45), t0);
+        let mut at = t0;
+        for _ in 0..14 {
+            at += INTERVAL;
+            assert!(core.sample(memory(46), at).is_none());
+        }
+        // 30 s after the last send.
+        let update = core.sample(memory(46), at + INTERVAL);
+        assert_eq!(bottom(update).as_deref(), Some("46%"));
+    }
+
+    #[test]
+    fn closed_tier_measures_from_the_value_last_sent() {
+        let mut core = Core::new(PanelSettings::default());
+        let t0 = Instant::now();
+        core.sample(memory(45), t0);
+        assert!(core.sample(memory(46), t0 + INTERVAL).is_none());
+        // 47 % is two points from the 45 % on the panel, not one from the 46 % sampled.
+        assert!(core.sample(memory(47), t0 + 2 * INTERVAL).is_some());
+    }
+
+    #[test]
+    fn closed_tier_sends_a_new_warning_under_the_threshold() {
+        let mut core = Core::new(PanelSettings::default());
+        let t0 = Instant::now();
+        core.sample(memory(89), t0);
+        let update = core.sample(memory(90), t0 + INTERVAL).unwrap();
+        assert!(update.panel.row_warns(RowKind::Memory));
+        let update = core.sample(memory(89), t0 + 2 * INTERVAL).unwrap();
+        assert!(!update.panel.row_warns(RowKind::Memory));
     }
 
     #[test]

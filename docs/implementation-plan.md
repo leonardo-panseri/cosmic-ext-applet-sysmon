@@ -111,7 +111,9 @@ on the host through `flatpak-spawn --host`. A setting to choose another app can 
 Every libcosmic message re-renders the view, and a panel redraw also costs the compositor. Therefore:
 
 - The sampler runs on its own thread, never in `update()`.
-- It sends the **closed-tier** state to the UI only when the panel's **formatted** text or warning state changes.
+- It sends the **closed-tier** state to the UI only when a shown value moved enough from the value last sent
+  (2 points for a percentage, 1 °C, a 1.5× ratio for a network rate, held while both rates are below 16 KiB/s),
+  when the warnings change or a value appears or disappears, or after 30 s if a held value drifted.
   History is appended on the sampler side and sent with the next update, or when the popup opens.
 - The panel button gets a **fixed width** per layout, using tabular/monospace digits, so changing values
   never re-lay out the whole panel.

@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! What the panel button shows (plan §2.1), as plain data: its settings, the formatted values
-//! and the active warnings. The sampler builds a [`PanelSummary`] every tick and sends it only
-//! when it differs from the last one (D6); the UI only lays it out.
+//! and the active warnings. The sampler builds a [`PanelSummary`] every tick and, while the popup
+//! is closed, sends it only when it moved enough from the last one sent ([`PanelHysteresis`],
+//! D6); the UI only lays it out.
 
 pub mod format;
+mod hysteresis;
+
+pub use hysteresis::PanelHysteresis;
 
 use std::ops::RangeInclusive;
 
