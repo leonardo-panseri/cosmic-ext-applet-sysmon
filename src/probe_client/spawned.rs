@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use sysmon_proto::{Reply, Request};
 
-use super::{Probe, REPLY_TIMEOUT};
+use super::{NVML_REPLY_TIMEOUT, Probe, REPLY_TIMEOUT};
 
 /// The wait before restarting a probe after its first transient failure; it doubles with each
 /// failure in a row, up to [`MAX_BACKOFF`].
@@ -25,8 +25,8 @@ pub const MAX_TRANSIENT_FAILURES: u32 = 5;
 /// - **Permanent** (ADR 0002): it can't start, or fails the handshake (the host's loader or glibc
 ///   refuses it, another protocol version), or breaks the protocol. Logged once; every later
 ///   call returns `None` at once.
-/// - **Transient**: after a good handshake, it misses [`REPLY_TIMEOUT`] (a scan under heavy load
-///   or swap) or exits. The child is killed and reaped, never reused: the protocol has no request
+/// - **Transient**: after a good handshake, it misses [`REPLY_TIMEOUT`] ([`NVML_REPLY_TIMEOUT`]
+///   for NVML; a scan under heavy load or swap) or exits. The child is killed and reaped, never reused: the protocol has no request
 ///   ids, so its late reply could be read as the answer to the next request. A new one is started
 ///   on the first call after [`backoff`]; [`MAX_TRANSIENT_FAILURES`] in a row are permanent, and
 ///   a good reply resets the count.
@@ -38,6 +38,8 @@ pub struct Spawned {
     failures: u32,
     handshake_timeout: Duration,
     reply_timeout: Duration,
+    /// For [`Request::Gpus`] with NVML.
+    nvml_reply_timeout: Duration,
     first_backoff: Duration,
 }
 
@@ -90,6 +92,7 @@ impl Spawned {
             failures: 0,
             handshake_timeout,
             reply_timeout: REPLY_TIMEOUT,
+            nvml_reply_timeout: NVML_REPLY_TIMEOUT,
             first_backoff: FIRST_BACKOFF,
         }
     }
@@ -97,6 +100,7 @@ impl Spawned {
     #[cfg(test)]
     fn with_timeouts(mut self, reply_timeout: Duration, first_backoff: Duration) -> Self {
         self.reply_timeout = reply_timeout;
+        self.nvml_reply_timeout = reply_timeout;
         self.first_backoff = first_backoff;
         self
     }
@@ -131,7 +135,11 @@ impl Spawned {
 
 impl Probe for Spawned {
     fn ask(&mut self, request: Request) -> Option<Reply> {
-        let timeout = self.reply_timeout;
+        let timeout = if matches!(request, Request::Gpus { nvml: true }) {
+            self.nvml_reply_timeout
+        } else {
+            self.reply_timeout
+        };
         let result = self.session()?.ask(request, timeout);
         // Replacing the state drops a failed session, which kills and reaps its child.
         match result {

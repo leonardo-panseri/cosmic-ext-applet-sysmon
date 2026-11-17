@@ -7,18 +7,21 @@
 //! Nothing else of the PCI device is read: no config space, no vendor or device ids.
 //!
 //! `libnvidia-ml.so.1` is `dlopen`ed on the first request that wants NVML, and kept loaded;
-//! loading it doesn't touch any GPU. For each card, its `runtime_status` is read immediately
-//! before `nvmlInit_v2`, and NVML is called only if the card is awake. Each sample is then
-//! init → handle by bus id → queries → shutdown, so nothing is held between samples and the
-//! probe never has NVML initialised when it exits. Every NVML call wakes a suspended card and
-//! calls every few seconds keep an idle one awake (spike S1), so *when* to ask is the applet's
-//! back-off, not decided here.
+//! loading it doesn't touch any GPU. `nvmlInit_v2` isn't per card: it wakes every suspended
+//! one (spike S1). So immediately before it, the `runtime_status` of **every** card the driver
+//! lists is read, and NVML is called only if all of them are awake; otherwise every card is
+//! skipped. A sample is then one session: init → for each card, handle by bus id → queries →
+//! shutdown, so nothing is held between samples and the probe never has NVML initialised when
+//! it exits. Every NVML call wakes a suspended card and calls every few seconds keep an idle one
+//! awake (S1), so *when* to ask is the applet's back-off, not decided here.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_uint};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sysmon_proto::{MAX_GPUS, NvidiaGpu, NvidiaState, NvmlSample};
+
+use crate::power;
 
 /// A sample slower than this probably raced the card's suspend; logged in debug mode.
 pub const SLOW_SAMPLE: Duration = Duration::from_secs(1);
@@ -48,9 +51,9 @@ pub struct Raw {
 
 /// One NVML session per call.
 pub trait Nvml: Send + std::fmt::Debug {
-    /// Init, the card at `bus_id`, its stats, shutdown. `None` if NVML fails or doesn't know
-    /// the card.
-    fn sample(&self, bus_id: &str) -> Option<Raw>;
+    /// Init, then the stats of each card in `bus_ids` in order, then shutdown. `None` if init
+    /// fails; otherwise one entry per card, `None` for a card NVML doesn't know or fails on.
+    fn session(&self, bus_ids: &[String]) -> Option<Vec<Option<Raw>>>;
 }
 
 /// Loads NVML; `None` without it.
@@ -97,22 +100,19 @@ impl Gpus {
         }
     }
 
-    /// Every NVIDIA GPU; with `nvml`, each awake one sampled.
+    /// The first [`MAX_GPUS`] NVIDIA GPUs; with `nvml`, sampled if every GPU is awake.
     pub fn answer(&mut self, nvml: bool) -> Vec<NvidiaGpu> {
-        let bus_ids = self.bus_ids();
-        if nvml && !bus_ids.is_empty() {
+        let all = self.bus_ids();
+        let states = if nvml && !all.is_empty() {
             self.load();
-        }
-        bus_ids
-            .into_iter()
-            .map(|bus_id| {
-                let state = if nvml {
-                    self.sample(&bus_id)
-                } else {
-                    NvidiaState::Skipped
-                };
-                NvidiaGpu { bus_id, state }
-            })
+            self.sample(&all)
+        } else {
+            vec![NvidiaState::Skipped; all.len()]
+        };
+        all.into_iter()
+            .zip(states)
+            .take(MAX_GPUS)
+            .map(|(bus_id, state)| NvidiaGpu { bus_id, state })
             .collect()
     }
 
@@ -126,38 +126,46 @@ impl Gpus {
         }
     }
 
-    /// Samples the card at `bus_id` if it is awake (D3), right after checking.
-    fn sample(&self, bus_id: &str) -> NvidiaState {
-        let Lazy::Loaded(Some(nvml)) = &self.nvml else {
-            return if self.awake(bus_id) {
-                NvidiaState::Unavailable
-            } else {
-                NvidiaState::Skipped
-            };
-        };
-        // Immediately before `nvmlInit_v2`.
-        if !self.awake(bus_id) {
-            return NvidiaState::Skipped;
+    /// The states of the cards `all`, in order: the first [`MAX_GPUS`] sampled in one NVML
+    /// session if every card is awake (D3), right after checking; all skipped otherwise.
+    fn sample(&self, all: &[String]) -> Vec<NvidiaState> {
+        let every = |state: NvidiaState| vec![state; all.len()];
+        // Immediately before `nvmlInit_v2`, which would wake any of them.
+        if !all.iter().all(|bus_id| self.awake(bus_id)) {
+            return every(NvidiaState::Skipped);
         }
+        let Lazy::Loaded(Some(nvml)) = &self.nvml else {
+            return every(NvidiaState::Unavailable);
+        };
+        let shown = &all[..all.len().min(MAX_GPUS)];
         let start = Instant::now();
-        let raw = nvml.sample(bus_id);
+        let raws = nvml.session(shown);
         let took = start.elapsed();
         if took > SLOW_SAMPLE && self.debug {
-            eprintln!("probe: NVML sample of {bus_id} took {took:?}; it may have raced a suspend");
+            eprintln!("probe: NVML sample took {took:?}; it may have raced a suspend");
         }
-        raw.map_or(NvidiaState::Unavailable, |raw| {
-            NvidiaState::Sampled(plausible(raw))
-        })
+        let Some(raws) = raws else {
+            return every(NvidiaState::Unavailable);
+        };
+        raws.into_iter()
+            .map(|raw| {
+                raw.map_or(NvidiaState::Unavailable, |r| {
+                    NvidiaState::Sampled(plausible(r))
+                })
+            })
+            .chain(std::iter::repeat(NvidiaState::Unavailable))
+            .take(all.len())
+            .collect()
     }
 
-    /// Whether the card is awake and stays so without our help: `runtime_status` is `active`,
-    /// or `unsupported` (runtime power management off, so it never suspends).
+    /// Whether the card is awake and stays so without our help ([`power::RuntimeStatus::may_query`]).
     fn awake(&self, bus_id: &str) -> bool {
         std::fs::read_to_string(self.sysfs.join(bus_id).join("power/runtime_status"))
-            .is_ok_and(|s| matches!(s.trim(), "active" | "unsupported"))
+            .is_ok_and(|s| power::parse_runtime_status(&s).may_query())
     }
 
-    /// The bus ids the driver lists, sorted, at most [`MAX_GPUS`].
+    /// The bus ids the driver lists, sorted: every one, as each is checked before NVML starts,
+    /// but at most [`MAX_DIR_ENTRIES`] (D8).
     fn bus_ids(&self) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(&self.procfs) else {
             return Vec::new();
@@ -169,7 +177,6 @@ impl Gpus {
             .filter(|name| is_bus_id(name))
             .collect();
         ids.sort();
-        ids.truncate(MAX_GPUS);
         ids
     }
 }
@@ -385,16 +392,22 @@ impl Library {
 }
 
 impl Nvml for Library {
-    fn sample(&self, bus_id: &str) -> Option<Raw> {
-        let bus_id = CString::new(bus_id).ok()?;
+    fn session(&self, bus_ids: &[String]) -> Option<Vec<Option<Raw>>> {
+        let bus_ids: Vec<_> = bus_ids
+            .iter()
+            .map(|b| CString::new(b.as_str()).ok())
+            .collect();
         // SAFETY: init and shutdown are paired, and `query` runs between them.
         unsafe {
             if (self.init)() != SUCCESS {
                 return None;
             }
-            let raw = self.query(&bus_id);
+            let raws = bus_ids
+                .iter()
+                .map(|b| b.as_deref().and_then(|b| self.query(b)))
+                .collect();
             (self.shutdown)();
-            raw
+            Some(raws)
         }
     }
 }
@@ -440,8 +453,8 @@ mod tests {
     }
 
     thread_local! {
-        /// The bus ids the fake NVML was asked about, in order.
-        static ASKED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        /// The fake NVML's sessions, each with the bus ids it was asked about, in order.
+        static SESSIONS: RefCell<Vec<Vec<String>>> = const { RefCell::new(Vec::new()) };
     }
     /// Loads of the fake NVML.
     static LOADS: Mutex<u32> = Mutex::new(0);
@@ -450,14 +463,15 @@ mod tests {
     struct Fake;
 
     impl Nvml for Fake {
-        fn sample(&self, bus_id: &str) -> Option<Raw> {
-            ASKED.with(|a| a.borrow_mut().push(bus_id.into()));
-            Some(Raw {
+        fn session(&self, bus_ids: &[String]) -> Option<Vec<Option<Raw>>> {
+            SESSIONS.with(|s| s.borrow_mut().push(bus_ids.to_vec()));
+            let raw = Raw {
                 util: Some(40),
                 power_mw: Some(590_000),
                 limit_mw: Some(80_000),
                 ..Raw::default()
-            })
+            };
+            Some(vec![Some(raw); bus_ids.len()])
         }
     }
 
@@ -471,38 +485,65 @@ mod tests {
         None
     }
 
-    fn asked() -> Vec<String> {
-        ASKED.with(|a| a.borrow_mut().drain(..).collect())
+    /// The fake NVML's sessions since the last call: one `nvmlInit_v2` each.
+    fn sessions() -> Vec<Vec<String>> {
+        SESSIONS.with(|s| s.borrow_mut().drain(..).collect())
     }
 
     #[test]
-    fn only_awake_cards_are_sampled() {
+    fn awake_cards_are_sampled_in_one_session() {
         let dir = TempDir::new("awake");
         let (procfs, sysfs) = host(
             &dir,
-            &[
-                ("0000:01:00.0", "suspended"),
-                ("0000:02:00.0", "active"),
-                ("0000:03:00.0", "resuming"),
-                ("0000:04:00.0", "unsupported"),
-            ],
+            &[("0000:02:00.0", "active"), ("0000:04:00.0", "unsupported")],
         );
         let mut gpus = Gpus::with(&procfs, &sysfs, fake, false);
-        let states: Vec<_> = gpus
+        let sampled: Vec<_> = gpus
             .answer(true)
             .into_iter()
-            .map(|g| (g.bus_id, matches!(g.state, NvidiaState::Sampled(_))))
+            .map(|g| matches!(g.state, NvidiaState::Sampled(_)))
             .collect();
-        assert_eq!(
-            states,
-            [
-                ("0000:01:00.0".into(), false),
-                ("0000:02:00.0".into(), true),
-                ("0000:03:00.0".into(), false),
-                ("0000:04:00.0".into(), true),
-            ]
+        assert_eq!(sampled, [true, true]);
+        assert_eq!(sessions(), [["0000:02:00.0", "0000:04:00.0"]]);
+    }
+
+    #[test]
+    fn any_card_not_awake_keeps_nvml_from_starting() {
+        for status in ["suspended", "suspending", "resuming", "error"] {
+            let dir = TempDir::new(status);
+            let (procfs, sysfs) = host(
+                &dir,
+                &[("0000:01:00.0", "active"), ("0000:02:00.0", status)],
+            );
+            let states: Vec<_> = Gpus::with(&procfs, &sysfs, fake, false)
+                .answer(true)
+                .into_iter()
+                .map(|g| g.state)
+                .collect();
+            assert_eq!(
+                states,
+                [NvidiaState::Skipped, NvidiaState::Skipped],
+                "{status}"
+            );
+            assert_eq!(sessions(), Vec::<Vec<String>>::new(), "{status}");
+        }
+    }
+
+    #[test]
+    fn one_suspended_card_keeps_nvml_from_starting_for_any() {
+        let dir = TempDir::new("one-suspended");
+        let (procfs, sysfs) = host(
+            &dir,
+            &[("0000:01:00.0", "active"), ("0000:02:00.0", "suspended")],
         );
-        assert_eq!(asked(), ["0000:02:00.0", "0000:04:00.0"]);
+        let states: Vec<_> = Gpus::with(&procfs, &sysfs, fake, false)
+            .answer(true)
+            .into_iter()
+            .map(|g| g.state)
+            .collect();
+        // `nvmlInit_v2` isn't per card: it would wake the suspended one too (S1).
+        assert_eq!(sessions(), Vec::<Vec<String>>::new());
+        assert_eq!(states, [NvidiaState::Skipped, NvidiaState::Skipped]);
     }
 
     #[test]
@@ -514,7 +555,7 @@ mod tests {
         let reply = gpus.answer(false);
         assert_eq!(reply.len(), 1);
         assert_eq!(reply[0].state, NvidiaState::Skipped);
-        assert_eq!(asked(), Vec::<String>::new());
+        assert_eq!(sessions(), Vec::<Vec<String>>::new());
         assert!(matches!(gpus.nvml, Lazy::Untried(_)));
         // Loaded once, on the first request that wants it.
         gpus.answer(true);
@@ -528,14 +569,14 @@ mod tests {
         let dir = TempDir::new("missing");
         let (procfs, sysfs) = host(
             &dir,
-            &[("0000:01:00.0", "active"), ("0000:02:00.0", "suspended")],
+            &[("0000:01:00.0", "active"), ("0000:02:00.0", "unsupported")],
         );
         let states: Vec<_> = Gpus::with(&procfs, &sysfs, missing, false)
             .answer(true)
             .into_iter()
             .map(|g| g.state)
             .collect();
-        assert_eq!(states, [NvidiaState::Unavailable, NvidiaState::Skipped]);
+        assert_eq!(states, [NvidiaState::Unavailable, NvidiaState::Unavailable]);
     }
 
     #[test]

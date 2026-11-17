@@ -15,9 +15,9 @@ use cosmic::widget::{self, icon};
 use crate::app::Message;
 use crate::fl;
 use crate::panel::{PanelSettings, format};
-use crate::sampler::stats::{GpuSample, Stats};
-use crate::ui::graph;
+use crate::sampler::stats::{GpuSample, Stats, share};
 use crate::ui::settings::{self, SettingsModels};
+use crate::ui::{graph, icons};
 use sysmon_proto::Process;
 
 /// The stats page scrolls beyond this, so the popup stays on screen with the footer.
@@ -337,7 +337,6 @@ fn disk<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> 
         ));
     }
     for drive in &stats.drives {
-        let hot = drive.limit.is_some_and(|limit| drive.celsius >= limit);
         rows.push(
             widget::Row::new()
                 .spacing(cosmic::theme::spacing().space_xxs)
@@ -346,7 +345,7 @@ fn disk<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> 
                 .push(one_line(widget::text::body(drive.name.as_str())).width(Length::Fill))
                 .push(warn_if(
                     widget::text::body(format::celsius(drive.celsius)),
-                    hot,
+                    drive.hot(),
                 ))
                 .into(),
         );
@@ -535,23 +534,12 @@ fn named_icon<'a>(name: &'static str) -> Element<'a, Message> {
     icon::from_name(name).size(ICON_SIZE).icon().into()
 }
 
-/// Memory and VRAM: COSMIC's icon theme has no memory icon, so it is drawn here.
 fn memory_icon<'a>() -> Element<'a, Message> {
-    embedded(include_bytes!("../../resources/icons/memory-symbolic.svg"))
+    icon::icon(icons::memory()).size(ICON_SIZE).into()
 }
 
-/// Temperatures: COSMIC's icon theme has no thermometer, so it is drawn here.
 fn temperature_icon<'a>() -> Element<'a, Message> {
-    embedded(include_bytes!(
-        "../../resources/icons/temperature-symbolic.svg"
-    ))
-}
-
-fn embedded<'a>(svg: &'static [u8]) -> Element<'a, Message> {
-    let mut handle = icon::from_svg_bytes(svg);
-    // Drawn in the text colour, like the theme's symbolic icons.
-    handle.symbolic = true;
-    icon::icon(handle).size(ICON_SIZE).into()
+    icon::icon(icons::temperature()).size(ICON_SIZE).into()
 }
 
 /// A wireless, mobile or wired icon, from the interface's name as systemd names them.
@@ -572,14 +560,6 @@ fn used_of_total(used: u64, total: u64) -> String {
         used = format::used(used),
         total = format::size(total)
     )
-}
-
-/// `part` as a percentage of `whole`.
-fn share(part: u64, whole: u64) -> Option<f32> {
-    // Percentages need no more than f32 precision.
-    #[expect(clippy::cast_precision_loss, reason = "see above")]
-    #[expect(clippy::cast_possible_truncation, reason = "see above")]
-    (whole > 0).then(|| (part as f64 / whole as f64 * 100.0) as f32)
 }
 
 /// "up 3d 5h", "up 5h 12m" or "up 12m".

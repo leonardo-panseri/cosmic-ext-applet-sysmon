@@ -32,14 +32,24 @@ _Avoid_: active mode, full mode
 One tick's raw numbers.
 _Avoid_: reading, measurement
 
+**Reading**:
+One value from one sensor, counter or NVML query, such as a temperature or a power draw; a sample is
+made of many. An implausible reading is dropped.
+_Avoid_: sample (for a single value)
+
 **History**:
 The last 60 samples, kept for the graphs.
 _Avoid_: buffer, log
 
 **Probe**:
-The helper started once on the host with `flatpak-spawn --host`, for what the sandbox can't see.
+The small binary started once on the host with `flatpak-spawn --host`, for what the sandbox can't see.
 _Avoid_: daemon, helper, agent
 
 **Suspended**:
 Said of a GPU whose runtime power state is `suspended`. It is never queried beyond metadata.
 _Avoid_: asleep, off, idle
+
+**Idle**:
+Said of an awake GPU at 0 % load. Not suspended: it is still queried, but NVML backs off to every 15 s
+so the card can suspend (ADR 0003).
+_Avoid_: suspended, asleep, off

@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 /// Samples kept: 2 minutes at the 2 s interval.
 pub const HISTORY_LEN: usize = 60;
 
-/// A ring buffer of the last [`HISTORY_LEN`] values, oldest first.
+/// The last [`HISTORY_LEN`] values, oldest first, the oldest dropped as a new one comes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct History {
     values: VecDeque<f32>,

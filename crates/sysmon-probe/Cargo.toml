@@ -3,7 +3,7 @@ name = "sysmon-probe"
 version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
-description = "Host-side helper of the sysmon applet: process table, mounts and NVML, read-only"
+description = "Host probe of the sysmon applet: process table, mounts and NVML, read-only"
 publish = false
 
 [dependencies]

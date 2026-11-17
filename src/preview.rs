@@ -106,7 +106,11 @@ impl cosmic::Application for Preview {
         };
         let stats = fixture();
         let settings = PanelSettings::default();
-        let summary = PanelSummary::new(&stats, &settings);
+        let summary = PanelSummary::new(
+            &stats,
+            &settings,
+            settings.layout_for(core.applet.is_horizontal()),
+        );
         let preview = Self {
             core,
             shot,
@@ -132,7 +136,8 @@ impl cosmic::Application for Preview {
             Message::Setting(change) => {
                 self.settings = self.models.changed(change, &self.settings);
                 self.models.select(&self.settings);
-                self.summary = PanelSummary::new(&self.stats, &self.settings);
+                let layout = self.settings.layout_for(self.core.applet.is_horizontal());
+                self.summary = PanelSummary::new(&self.stats, &self.settings, layout);
             }
             _ => {}
         }

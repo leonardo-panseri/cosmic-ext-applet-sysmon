@@ -30,7 +30,7 @@ Measured inside a Flatpak sandbox on the reference laptop (`devices=dri`, no net
 | `/proc/<pid>` | 4 PIDs (sandbox) vs 482 on the host: Flatpak always unshares the PID namespace |
 | `/proc/self/mounts` | Describes the sandbox, not the host |
 
-So the applet reads everything it can directly. A small helper binary, the **probe**, does what the sandbox
+So the applet reads everything it can directly. A small binary, the **probe**, does what the sandbox
 can't (§3.2):
 
 - the process table
@@ -56,7 +56,7 @@ a D-Bus round trip plus a host shell reading every `/proc/<pid>/stat`, on every 
 | NVMe temps (each read is a SMART command) | every 30 s | every 30 s |
 | AMD iGPU sysfs | ✓ | ✓ |
 | dGPU `runtime_status` | ✓ (one small read) | ✓ |
-| dGPU NVML (only when `active`; every 15 s after 3 idle samples, ADR 0003) | only if `gpu` is on the bar | ✓ |
+| dGPU NVML (only when `active`; every 15 s after 3 idle samples, ADR 0003) | only if the panel button shows `gpu` | ✓ |
 | Top processes | – | ✓ (probe) |
 | Mounts + space | every 30 s (probe) | every 30 s (probe) |
 
@@ -144,7 +144,7 @@ Same three layouts as the reference:
 - **Compact:** only the top value.
 
 On a vertical panel, Stacked and One line become Compact. **Warnings:** a row turns the theme's destructive
-colour when its own value crosses a limit. If the problem is something not shown on the bar, the whole button
+colour when its own value crosses a limit. If the problem is something not shown on the panel button, the whole button
 turns that colour, and the tooltip says what's wrong. Left click toggles the popup. Right click opens the process monitor.
 
 Warn when:
@@ -191,9 +191,9 @@ network on, 85 °C, 90 %.
 ```
 crates/
   sysmon-proto/   # serde types for probe requests/replies, protocol version
-  sysmon-probe/   # host helper: dynamic glibc binary (ADR 0002), no libcosmic; lib reused in-process
+  sysmon-probe/   # host probe: dynamic glibc binary (ADR 0002), no libcosmic; lib reused in-process
 src/              # the applet
-  sampler/        # thread, tiers, rates, ring buffer
+  sampler/        # thread, tiers, rates, history
   sources/        # pure parsers: proc_stat, meminfo, net_dev, diskstats, hwmon, drm, nvidia_procfs
   probe_client/   # spawn, handshake, request/reply; in-process backend for non-Flatpak runs
   ui/             # panel button, popup pages, graph canvas
@@ -219,7 +219,7 @@ File handles stay open and are reread with `pread` at offset 0, so there is no `
   `dlopen` the host's `libnvidia-ml`. If it can't start, the applet uses sandbox-only data
   ([ADR 0002](adr/0002-dynamic-glibc-probe.md), spike S2).
 - **Non-Flatpak** (development, distro packages): the same `Probe` trait has an in-process backend, so
-  `cargo run` needs no helper.
+  `cargo run` needs no probe process.
 
 ### 3.3 Flatpak finish-args
 
@@ -277,7 +277,7 @@ Each phase ends with something runnable and with its checks passing.
 ### P1 — Sandbox sampler and panel button
 - Parsers and fixtures for `stat`, `meminfo`, `loadavg`, `uptime`, `net/dev`, `diskstats`, hwmon, DRM (AMD), `runtime_status`,
   nvidia procfs.
-- Sampler thread with tiers, rates from the measured monotonic elapsed time, ring buffer, change-only updates (D6).
+- Sampler thread with tiers, rates from the measured monotonic elapsed time, history, change-only updates (D6).
 - Panel button: the three layouts, configurable rows hard-coded for now, network rates, warning colours.
 - **Done when:** with the panel visible for 10 min and the popup closed:
   - `perf stat -p` shows under 0.1 % CPU
@@ -296,7 +296,7 @@ Each phase ends with something runnable and with its checks passing.
 
 ### P4 — GPUs
 - Spike S1, then NVIDIA via the probe, gated on `runtime_status`, with the idle back-off of ADR 0003. VRAM
-  cache (D4). Multiple GPUs, NVIDIA first. `gpu` on the bar means "first awake GPU, NVIDIA first".
+  cache (D4). Multiple GPUs, NVIDIA first. `gpu` on the panel button means "first awake GPU, NVIDIA first".
 - **Done when:**
   - running a GPU load with `prime-run` shows live NVIDIA stats
   - after the load ends, the card suspends again with the popup **open**: the back-off kicks in after 3 idle
@@ -320,7 +320,7 @@ Each phase ends with something runnable and with its checks passing.
 - **Popup:** opened from the panel button; has a **stats page** and a **settings page**.
 - **Closed tier / open tier:** the two sampling sets (D2), selected by whether the popup is open.
 - **Sample:** one tick's raw numbers. **History:** the last 60 samples kept for graphs.
-- **Probe:** the host helper started with `flatpak-spawn --host` (D1, §3.2).
+- **Probe:** the host binary started with `flatpak-spawn --host` (D1, §3.2).
 - **Suspended:** a GPU whose `runtime_status` is `suspended`; never queried beyond procfs/sysfs metadata.
 - **Warning:** a value at or above its limit; colours a row or the whole panel button.
 

@@ -36,6 +36,8 @@ pub struct AppModel {
     models: SettingsModels,
     /// The sampler's control channel, once it has started.
     sampler: Option<SamplerHandle>,
+    /// The panel orientation last sent to the sampler: `true` for horizontal.
+    sent_horizontal: Option<bool>,
     /// What the panel button shows, including the active warnings; `None` before the first sample.
     panel: Option<PanelSummary>,
     /// The last sample with its history, for the popup.
@@ -68,6 +70,19 @@ impl AppModel {
     fn popup_changed(&self) {
         if let Some(sampler) = &self.sampler {
             sampler.send(Control::PopupOpen(self.popup.is_some()));
+        }
+    }
+
+    /// Tells the sampler the panel's orientation if it hasn't been told yet or it changed: a
+    /// vertical panel shows only the top row, so the sampler builds its summaries for that (D6)
+    /// and leaves out NVML for a hidden GPU row (D2).
+    fn sync_orientation(&mut self) {
+        let horizontal = self.core.applet.is_horizontal();
+        if let Some(sampler) = &self.sampler
+            && self.sent_horizontal != Some(horizontal)
+        {
+            sampler.send(Control::Horizontal(horizontal));
+            self.sent_horizontal = Some(horizontal);
         }
     }
 
@@ -116,6 +131,7 @@ impl cosmic::Application for AppModel {
             settings,
             config,
             sampler: None,
+            sent_horizontal: None,
             panel: None,
             stats: None,
         };
@@ -163,6 +179,7 @@ impl cosmic::Application for AppModel {
     }
 
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
+        self.sync_orientation();
         match message {
             Message::TogglePopup => {
                 if let Some(id) = self.popup.take() {
@@ -206,6 +223,8 @@ impl cosmic::Application for AppModel {
                 // started. It started with the stored settings; a change since is sent here.
                 handle.send(Control::Settings(self.settings.clone()));
                 self.sampler = Some(handle);
+                self.sent_horizontal = None;
+                self.sync_orientation();
                 self.popup_changed();
             }
             Message::Sampled(update) => {

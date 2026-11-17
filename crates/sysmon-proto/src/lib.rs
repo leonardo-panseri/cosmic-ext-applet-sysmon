@@ -132,8 +132,8 @@ pub struct NvidiaGpu {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum NvidiaState {
-    /// Not asked: NVML wasn't requested, or the card wasn't awake (`runtime_status` other than
-    /// `active`), so nothing touched it.
+    /// Not asked: NVML wasn't requested, or some NVIDIA card wasn't awake (`runtime_status`
+    /// other than `active` or `unsupported`), so NVML wasn't started and nothing touched any.
     Skipped,
     /// Awake, but NVML isn't installed or failed.
     Unavailable,

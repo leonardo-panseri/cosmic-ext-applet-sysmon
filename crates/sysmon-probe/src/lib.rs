@@ -13,6 +13,7 @@
 
 pub mod mounts;
 pub mod nvidia;
+pub mod power;
 pub mod procs;
 
 use std::io::{self, BufRead, Write};

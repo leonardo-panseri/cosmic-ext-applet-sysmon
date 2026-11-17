@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The panel button (plan §2.1): one of three layouts of a [`PanelSummary`], with fixed-width
-//! value cells so a changing value never re-lays out the panel (D6).
+//! The panel button (plan §2.1): one of three layouts of a [`PanelSummary`], each row an icon and
+//! a value, with fixed-size icons and fixed-width value cells so a changing value never re-lays
+//! out the panel (D6).
 
 use std::borrow::Cow;
 
@@ -10,11 +11,12 @@ use cosmic::iced::widget::text::LineHeight;
 use cosmic::iced::widget::{row, stack};
 use cosmic::iced::{Alignment, Color, Length};
 use cosmic::prelude::*;
-use cosmic::widget;
+use cosmic::widget::{self, icon};
 
 use crate::app::Message;
 use crate::fl;
 use crate::panel::{Layout, PanelSettings, PanelSummary, RowKind, Warning, format};
+use crate::ui::icons;
 
 /// Line height of the panel text, relative to its size.
 const LINE_HEIGHT: f32 = 1.2;
@@ -34,10 +36,9 @@ const MIN_FONT_SIZE: f32 = 9.0;
 /// default monospace font, and most others are 0.6 em).
 const MONO_ADVANCE: f32 = 0.6;
 
-/// One shown row: its label, value and whether it takes the warning colour.
+/// One shown row: what it shows, its value and whether it takes the warning colour.
 struct Row {
     kind: RowKind,
-    label: String,
     value: String,
     warn: bool,
 }
@@ -64,13 +65,12 @@ pub fn panel_button<'a>(
             });
             Row {
                 kind,
-                label: label(kind),
                 value: value.unwrap_or_else(|| fl!("no-value")),
                 warn: button_warns || summary.is_some_and(|s| s.row_warns(kind)),
             }
         })
         .collect();
-    let rates = settings.network.then(|| {
+    let rates = settings.shows_rates(layout).then(|| {
         let rate = |r: Option<&String>| r.cloned().unwrap_or_else(|| fl!("no-value"));
         [
             (fl!("download"), rate(summary.and_then(|s| s.down.as_ref()))),
@@ -85,18 +85,18 @@ pub fn panel_button<'a>(
         Layout::Stacked => {
             // As `applet.text_button`, which takes only a single text. The panel is horizontal.
             let size = font_size(height, STACKED_FONT_SHARE);
-            let (labels, values): (Vec<_>, Vec<_>) = rows
+            let (icons, values): (Vec<_>, Vec<_>) = rows
                 .into_iter()
                 .map(|row| {
                     (
-                        panel_text(row.label, size, row.warn).into(),
+                        row_icon(row.kind, size, row.warn),
                         value_cell(row.value, row.kind.widest_value(), size, row.warn),
                     )
                 })
                 .unzip();
-            // A column of labels beside a column of values, so the values line up.
+            // A column of icons beside a column of values, so the values line up.
             let mut content = row![
-                widget::Column::with_children(labels),
+                widget::Column::with_children(icons),
                 widget::Column::with_children(values),
             ];
             if let Some(rates) = rates {
@@ -120,7 +120,7 @@ pub fn panel_button<'a>(
             let mut content = widget::Row::new();
             for row in rows {
                 content = content
-                    .push(panel_text(row.label, size, row.warn))
+                    .push(row_icon(row.kind, size, row.warn))
                     .push(value_cell(
                         row.value,
                         row.kind.widest_value(),
@@ -207,14 +207,24 @@ fn warning_text(warning: &Warning) -> String {
     }
 }
 
-fn label(kind: RowKind) -> String {
-    match kind {
-        RowKind::Cpu => fl!("cpu"),
-        RowKind::Memory => fl!("memory"),
-        RowKind::Gpu => fl!("gpu"),
-        RowKind::Disk => fl!("disk"),
-        RowKind::CpuTemp => fl!("temperature"),
+/// A row's icon at the text's `size`, centred in a line of panel text; in the destructive colour
+/// if `warn`. Always the same size, whatever the value (D6).
+fn row_icon<'a>(kind: RowKind, size: f32, warn: bool) -> Element<'a, Message> {
+    // A few pixels, far inside u16.
+    #[expect(clippy::cast_possible_truncation, reason = "see above")]
+    #[expect(clippy::cast_sign_loss, reason = "see above")]
+    let pixels = size.round() as u16;
+    let mut icon = icon::icon(icons::row(kind)).size(pixels);
+    if warn {
+        icon = icon.class(cosmic::theme::Svg::custom(|theme| {
+            cosmic::iced::widget::svg::Style {
+                color: Some(theme.cosmic().destructive_color().into()),
+            }
+        }));
     }
+    widget::container(icon)
+        .center_y(Length::Fixed(size * LINE_HEIGHT))
+        .into()
 }
 
 /// The font size for text taking `share` of the button's `height`.

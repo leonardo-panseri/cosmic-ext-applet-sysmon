@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::readers::Wants;
 use super::stats::{Sample, Stats, Tracker};
-use crate::panel::{PanelSettings, PanelSummary, RowKind};
+use crate::panel::{Layout, PanelSettings, PanelSummary, RowKind};
 
 /// The sampling interval, in both tiers (D2).
 pub const INTERVAL: Duration = Duration::from_secs(2);
@@ -24,6 +24,9 @@ pub enum Control {
     OnBattery(bool),
     /// The panel button's settings changed (§2.3).
     Settings(PanelSettings),
+    /// The panel is horizontal, or vertical, where the panel button is always
+    /// [`Layout::Compact`]. Sent at start and whenever it changes.
+    Horizontal(bool),
 }
 
 /// What the sampler tells the UI.
@@ -36,8 +39,14 @@ pub struct Update {
 
 /// The sampler's state between ticks.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts the UI reports, not a state machine"
+)]
 pub struct Core {
     settings: PanelSettings,
+    /// Whether the panel is horizontal; until told, it is.
+    horizontal: bool,
     tracker: Tracker,
     popup_open: bool,
     /// Stay in the open tier whatever the popup does (`SYSMON_DEBUG_OPEN`).
@@ -54,6 +63,7 @@ impl Core {
     pub fn new(settings: PanelSettings) -> Self {
         Self {
             settings,
+            horizontal: true,
             tracker: Tracker::default(),
             popup_open: false,
             force_open: false,
@@ -71,13 +81,18 @@ impl Core {
         self
     }
 
+    /// The panel button's layout on this panel.
+    fn layout(&self) -> Layout {
+        self.settings.layout_for(self.horizontal)
+    }
+
     /// What the current tier reads beyond the closed tier: the processes while the popup is
     /// open, NVIDIA stats too, or whenever the panel button shows `gpu` (D2).
     #[must_use]
     pub fn wants(&self) -> Wants {
         let gpu_shown = self
             .settings
-            .shown_rows(self.settings.layout)
+            .shown_rows(self.layout())
             .contains(&RowKind::Gpu);
         Wants {
             processes: self.popup_open,
@@ -108,7 +123,7 @@ impl Core {
     pub fn sample(&mut self, sample: Sample, at: Instant) -> Option<Update> {
         let stats = self.tracker.ingest(sample, at);
         let update = Update {
-            panel: PanelSummary::new(&stats, &self.settings),
+            panel: PanelSummary::new(&stats, &self.settings, self.layout()),
             stats: Arc::new(stats),
         };
         self.last = Some((at, update.clone()));
@@ -116,8 +131,9 @@ impl Core {
     }
 
     /// Applies `control`. Opening the popup returns the last update right away, so the popup has
-    /// the history without waiting for a tick. New settings return the last sample's update
-    /// redone under them, if that changes what the panel button shows, so it redraws at once.
+    /// the history without waiting for a tick. New settings, or a new orientation, return the
+    /// last sample's update redone under them, if that changes what the panel button shows, so
+    /// it redraws at once.
     pub fn control(&mut self, control: Control) -> Option<Update> {
         match control {
             Control::PopupOpen(open) => {
@@ -133,15 +149,25 @@ impl Core {
             }
             Control::Settings(settings) => {
                 self.settings = settings;
-                let (at, last) = self.last.take()?;
-                let update = Update {
-                    panel: PanelSummary::new(&last.stats, &self.settings),
-                    stats: last.stats,
-                };
-                self.last = Some((at, update.clone()));
-                (self.sent.as_ref() != Some(&update.panel)).then(|| self.send(update))
+                self.redo()
+            }
+            Control::Horizontal(horizontal) => {
+                self.horizontal = horizontal;
+                self.redo()
             }
         }
+    }
+
+    /// The last sample's update under the current settings and layout, if that changes what
+    /// the panel button shows.
+    fn redo(&mut self) -> Option<Update> {
+        let (at, last) = self.last.take()?;
+        let update = Update {
+            panel: PanelSummary::new(&last.stats, &self.settings, self.layout()),
+            stats: last.stats,
+        };
+        self.last = Some((at, update.clone()));
+        (self.sent.as_ref() != Some(&update.panel)).then(|| self.send(update))
     }
 
     fn send(&mut self, update: Update) -> Update {
@@ -153,7 +179,6 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panel::{Layout, RowKind};
     use crate::sources::meminfo::MemInfo;
 
     fn memory(percent: u64) -> Sample {
@@ -181,6 +206,43 @@ mod tests {
             bottom(core.sample(memory(46), t0 + 2 * INTERVAL)).as_deref(),
             Some("46%")
         );
+    }
+
+    #[test]
+    fn values_compact_doesn_t_show_send_nothing() {
+        let compact = PanelSettings {
+            layout: Layout::Compact,
+            ..PanelSettings::default()
+        };
+        let mut core = Core::new(compact);
+        let t0 = Instant::now();
+        assert!(core.sample(memory(45), t0).is_some());
+        // Memory is the bottom row, which Compact doesn't show.
+        assert!(core.sample(memory(60), t0 + INTERVAL).is_none());
+    }
+
+    #[test]
+    fn a_vertical_panel_shows_only_the_top_row() {
+        let mut core = Core::new(PanelSettings::default());
+        assert!(core.control(Control::Horizontal(false)).is_none());
+        let t0 = Instant::now();
+        let update = core.sample(memory(45), t0).unwrap();
+        assert_eq!(update.panel.bottom, None);
+        assert!(core.sample(memory(60), t0 + INTERVAL).is_none());
+        // Back on a horizontal panel: the memory row at once.
+        let update = core.control(Control::Horizontal(true)).unwrap();
+        assert_eq!(update.panel.bottom.as_deref(), Some("60%"));
+    }
+
+    #[test]
+    fn a_gpu_row_hidden_by_a_vertical_panel_wants_no_nvml() {
+        let mut core = Core::new(PanelSettings {
+            bottom: RowKind::Gpu,
+            ..PanelSettings::default()
+        });
+        assert!(core.wants().nvml);
+        core.control(Control::Horizontal(false));
+        assert!(!core.wants().nvml);
     }
 
     #[test]
@@ -250,7 +312,7 @@ mod tests {
         let update = core.sample(sample, t0 + INTERVAL).unwrap();
         assert_eq!(update.panel.bottom.as_deref(), Some("89°C"));
 
-        // Neither CPU row on the bar: the whole button warns.
+        // Neither CPU row on the panel button: the whole button warns.
         let no_cpu = PanelSettings {
             top: RowKind::Disk,
             ..PanelSettings::default()
@@ -278,7 +340,7 @@ mod tests {
 
     #[test]
     fn a_layout_change_alone_sends_nothing() {
-        // The UI lays out the same summary; only the top and bottom values are in it.
+        // Stacked and one-line show the same values, only laid out differently.
         let mut core = Core::new(PanelSettings::default());
         core.sample(memory(45), Instant::now());
         let one_line = PanelSettings {
@@ -295,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn nvml_is_wanted_while_open_or_with_gpu_on_the_bar() {
+    fn nvml_is_wanted_while_open_or_with_gpu_on_the_panel_button() {
         let mut core = Core::new(PanelSettings::default());
         assert_eq!(core.wants(), Wants::default());
         core.control(Control::PopupOpen(true));

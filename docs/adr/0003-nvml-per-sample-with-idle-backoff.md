@@ -28,8 +28,9 @@ Spike S1 measured NVML against runtime power management on the reference laptop 
 Option (b), with a back-off:
 
 - Before **every** NVML sample the probe reads the card's `runtime_status`, and calls nothing unless it is
-  `active`. Each sample is init → query → shutdown, so nothing is held between samples and there's never a
-  shutdown or exit to do while the card is suspended.
+  `active`. With several NVIDIA cards it reads every one's, since `nvmlInit_v2` isn't per card, and calls
+  nothing unless all are awake. Each sample is one init → query each card → shutdown, so nothing is held
+  between samples and there's never a shutdown or exit to do while a card is suspended.
 - While the card's load is above 0 %, sample at the tier's normal rate (2 s). After 3 samples in a row at
   0 %, drop to one sample every 15 s, so an idle card can suspend. Go back to 2 s as soon as a sample
   shows load. The panel's `gpu` row follows the same rule.

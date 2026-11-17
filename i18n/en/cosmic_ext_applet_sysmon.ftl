@@ -8,7 +8,6 @@ cpu = CPU
 memory = RAM
 gpu = GPU
 disk = Disk
-temperature = Temp
 download = ↓
 upload = ↑
 no-value = –

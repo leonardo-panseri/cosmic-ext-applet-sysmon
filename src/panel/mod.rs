@@ -131,6 +131,12 @@ impl PanelSettings {
         }
     }
 
+    /// Whether `layout` shows the network rates: they are on, and the layout has room for them.
+    #[must_use]
+    pub fn shows_rates(&self, layout: Layout) -> bool {
+        self.network && layout != Layout::Compact
+    }
+
     /// Whether a CPU or GPU temperature warns.
     #[must_use]
     pub fn hot(&self, celsius: f32) -> bool {
@@ -233,35 +239,40 @@ pub fn warnings(stats: &Stats, settings: &PanelSettings) -> Vec<Warning> {
             limit: usage_limit,
         })
     }));
-    warnings.extend(stats.drives.iter().filter_map(|d| {
-        let limit = d.limit.filter(|&limit| d.celsius >= limit)?;
+    warnings.extend(stats.drives.iter().filter(|d| d.hot()).filter_map(|d| {
         Some(Warning::Nvme {
             drive: d.name.clone(),
             celsius: whole(d.celsius),
-            limit: whole(limit),
+            limit: whole(d.limit?),
         })
     }));
     warnings
 }
 
-/// Everything the panel button shows, formatted. `None` values show as a dash.
+/// Everything the panel button shows in one layout, formatted, and nothing it doesn't, so two
+/// summaries differ only when the button would look different (D6). `None` values show as a
+/// dash, or aren't shown at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelSummary {
     pub top: Option<String>,
+    /// `None` when the layout shows only the top row.
     pub bottom: Option<String>,
     /// Network download and upload; both `None` when the rates are hidden.
     pub down: Option<String>,
     pub up: Option<String>,
-    /// The DRM card the GPU row shows, which owns its temperature warning.
+    /// The DRM card the GPU row shows, which owns its temperature warning; `None` without a
+    /// GPU row.
     pub gpu_card: Option<String>,
-    /// Also listed in the panel button's tooltip.
+    /// Every warning, shown or not: also listed in the panel button's tooltip.
     pub warnings: Vec<Warning>,
 }
 
 impl PanelSummary {
+    /// What the panel button shows of `stats` in `layout`, the one `settings` give the panel.
     #[must_use]
-    pub fn new(stats: &Stats, settings: &PanelSettings) -> Self {
-        let (down, up) = if settings.network {
+    pub fn new(stats: &Stats, settings: &PanelSettings, layout: Layout) -> Self {
+        let shown = settings.shown_rows(layout);
+        let (down, up) = if settings.shows_rates(layout) {
             let total = stats.net_total;
             (
                 total.map(|t| format::rate(t.first)),
@@ -272,10 +283,13 @@ impl PanelSummary {
         };
         Self {
             top: row_value(settings.top, stats),
-            bottom: row_value(settings.bottom, stats),
+            bottom: shown.get(1).and_then(|&kind| row_value(kind, stats)),
             down,
             up,
-            gpu_card: stats.first_awake_gpu().map(|g| g.card.clone()),
+            gpu_card: shown
+                .contains(&RowKind::Gpu)
+                .then(|| stats.first_awake_gpu().map(|g| g.card.clone()))
+                .flatten(),
             warnings: warnings(stats, settings),
         }
     }
@@ -374,7 +388,7 @@ mod tests {
             }),
             ..Stats::default()
         };
-        let summary = PanelSummary::new(&stats, &PanelSettings::default());
+        let summary = PanelSummary::new(&stats, &PanelSettings::default(), Layout::Stacked);
         assert_eq!(
             summary,
             PanelSummary {
@@ -394,8 +408,40 @@ mod tests {
             network: false,
             ..PanelSettings::default()
         };
-        let summary = PanelSummary::new(&Stats::default(), &settings);
+        let summary = PanelSummary::new(&Stats::default(), &settings, Layout::Stacked);
         assert_eq!((summary.top, summary.down, summary.up), (None, None, None));
+    }
+
+    #[test]
+    fn compact_holds_only_the_top_value_and_every_warning() {
+        let stats = Stats {
+            cpu: Some(12.4),
+            mem: Some(memory(95)),
+            gpus: vec![amd_gpu(37, 50.0)],
+            net_total: Some(PairRate {
+                first: 1229.0,
+                second: 20.0,
+            }),
+            ..Stats::default()
+        };
+        let settings = PanelSettings {
+            bottom: RowKind::Gpu,
+            ..PanelSettings::default()
+        };
+        assert_eq!(
+            PanelSummary::new(&stats, &settings, Layout::Compact),
+            PanelSummary {
+                top: Some("12%".into()),
+                bottom: None,
+                down: None,
+                up: None,
+                gpu_card: None,
+                warnings: vec![Warning::Memory {
+                    percent: 95,
+                    limit: 90
+                }],
+            }
+        );
     }
 
     #[test]
@@ -413,6 +459,7 @@ mod tests {
                     top,
                     ..PanelSettings::default()
                 },
+                Layout::Stacked,
             )
             .top
         };
@@ -521,6 +568,7 @@ mod tests {
                     ..Stats::default()
                 },
                 &PanelSettings::default(),
+                Layout::Stacked,
             )
         };
         assert_eq!(at(90.1), at(90.4));
@@ -531,7 +579,7 @@ mod tests {
     const DEFAULT_ROWS: [RowKind; 2] = [RowKind::Cpu, RowKind::Memory];
 
     fn summary(stats: &Stats) -> PanelSummary {
-        PanelSummary::new(stats, &PanelSettings::default())
+        PanelSummary::new(stats, &PanelSettings::default(), Layout::Stacked)
     }
 
     #[test]
@@ -543,7 +591,7 @@ mod tests {
         assert!(summary.row_warns(RowKind::Memory));
         assert!(!summary.row_warns(RowKind::Cpu));
         assert!(!summary.button_warns(&DEFAULT_ROWS));
-        // Off the bar: the whole button.
+        // Not on the panel button: the whole button.
         assert!(summary.button_warns(&[RowKind::Cpu, RowKind::Disk]));
         assert!(summary.button_warns(&[RowKind::Cpu]));
     }
@@ -560,7 +608,7 @@ mod tests {
         assert!(!summary.button_warns(&DEFAULT_ROWS));
         assert!(summary.row_warns(RowKind::CpuTemp));
         assert!(!summary.button_warns(&[RowKind::Memory, RowKind::CpuTemp]));
-        // Neither CPU row on the bar: the whole button.
+        // Neither CPU row on the panel button: the whole button.
         assert!(summary.button_warns(&[RowKind::Memory, RowKind::Disk]));
     }
 
@@ -582,19 +630,34 @@ mod tests {
         assert!(other.button_warns(&[RowKind::Cpu, RowKind::Disk]));
     }
 
+    /// The GPU load over memory.
+    const GPU_ROWS: [RowKind; 2] = [RowKind::Gpu, RowKind::Memory];
+
+    fn gpu_summary(stats: &Stats) -> PanelSummary {
+        let settings = PanelSettings {
+            top: RowKind::Gpu,
+            ..PanelSettings::default()
+        };
+        PanelSummary::new(stats, &settings, Layout::Stacked)
+    }
+
     #[test]
     fn the_gpu_row_owns_the_temperature_of_the_gpu_it_shows() {
-        let hot_amd = summary(&Stats {
+        let hot_amd = Stats {
             gpus: vec![amd_gpu(20, 95.0)],
             ..Stats::default()
-        });
-        assert_eq!(hot_amd.gpu_card.as_deref(), Some("card1"));
-        assert!(hot_amd.row_warns(RowKind::Gpu));
-        assert!(!hot_amd.button_warns(&[RowKind::Gpu, RowKind::Memory]));
-        assert!(hot_amd.button_warns(&DEFAULT_ROWS));
+        };
+        let shown = gpu_summary(&hot_amd);
+        assert_eq!(shown.gpu_card.as_deref(), Some("card1"));
+        assert!(shown.row_warns(RowKind::Gpu));
+        assert!(!shown.button_warns(&GPU_ROWS));
+        // Without a GPU row: the whole button.
+        let hidden = summary(&hot_amd);
+        assert_eq!(hidden.gpu_card, None);
+        assert!(hidden.button_warns(&DEFAULT_ROWS));
 
         // The awake NVIDIA card is shown; the hot iGPU isn't, so the whole button warns.
-        let shows_nvidia = summary(&Stats {
+        let shows_nvidia = gpu_summary(&Stats {
             gpus: vec![
                 amd_gpu(20, 95.0),
                 nvidia_gpu(RuntimeStatus::Active, Some(50), Some(70.0)),
@@ -603,10 +666,10 @@ mod tests {
         });
         assert_eq!(shows_nvidia.gpu_card.as_deref(), Some("card0"));
         assert!(!shows_nvidia.row_warns(RowKind::Gpu));
-        assert!(shows_nvidia.button_warns(&[RowKind::Gpu, RowKind::Memory]));
+        assert!(shows_nvidia.button_warns(&GPU_ROWS));
 
         // A hot NVIDIA card on the GPU row.
-        let hot_nvidia = summary(&Stats {
+        let hot_nvidia = gpu_summary(&Stats {
             gpus: vec![
                 amd_gpu(20, 50.0),
                 nvidia_gpu(RuntimeStatus::Active, Some(90), Some(88.0)),
@@ -614,7 +677,7 @@ mod tests {
             ..Stats::default()
         });
         assert!(hot_nvidia.row_warns(RowKind::Gpu));
-        assert!(!hot_nvidia.button_warns(&[RowKind::Gpu, RowKind::Memory]));
+        assert!(!hot_nvidia.button_warns(&GPU_ROWS));
     }
 
     #[test]
@@ -632,13 +695,14 @@ mod tests {
                 top: RowKind::Gpu,
                 ..PanelSettings::default()
             },
+            Layout::Stacked,
         );
         assert_eq!(summary.top.as_deref(), Some("7%"));
         assert_eq!(summary.gpu_card.as_deref(), Some("card1"));
     }
 
     #[test]
-    fn nvme_temperatures_are_never_on_the_bar() {
+    fn nvme_temperatures_are_never_on_the_panel_button() {
         let summary = summary(&Stats {
             drives: vec![DriveTemp {
                 name: "Samsung SSD 980 PRO".into(),

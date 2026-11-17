@@ -30,11 +30,16 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the probe has to answer a request. A process scan takes milliseconds, plus a 250 ms
 /// baseline when the popup opens.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long the probe has to answer [`Request::Gpus`] with NVML. Spike S1 measured a sample
+/// that raced a card's suspend at about 1.85 s (an awake card takes about 16 ms), so a probe
+/// killed for missing [`REPLY_TIMEOUT`] would rarely be in the middle of an NVML session.
+pub const NVML_REPLY_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Something that answers probe [`Request`]s.
 pub trait Probe: Send + std::fmt::Debug {
     /// The reply to `request`; `None` if the probe is unavailable. Blocks until the reply, at
-    /// most about [`REPLY_TIMEOUT`] (plus [`HANDSHAKE_TIMEOUT`] on the first call).
+    /// most about [`REPLY_TIMEOUT`], or [`NVML_REPLY_TIMEOUT`] (plus [`HANDSHAKE_TIMEOUT`] on the
+    /// first call).
     fn ask(&mut self, request: Request) -> Option<Reply>;
 
     /// The top [`MAX_TOP`] processes by CPU and by memory.

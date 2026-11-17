@@ -120,17 +120,34 @@ struct Chip {
     input: (String, Pread),
 }
 
+/// How [`Chip::open`] reads a chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Open {
+    /// Every temperature file: an on-chip sensor answers from a register.
+    All,
+    /// The name and labels, then only the main sensor's limits; no `temp*_input`. Every other
+    /// temperature file of an `nvme` chip is a command to the drive.
+    Labels,
+}
+
 impl Chip {
-    /// Reads the chip in `dir` if it is one [`hwmon::classify`] knows.
-    fn open(dir: &Path) -> Option<Self> {
+    /// Reads the chip in `dir`, as `how` says, if it is one [`hwmon::classify`] knows.
+    fn open(dir: &Path, how: Open) -> Option<Self> {
         let mut files = Vec::new();
         for entry in std::fs::read_dir(dir).ok()?.take(MAX_DIR_ENTRIES).flatten() {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            if hwmon::is_wanted_file(&name)
-                && let Ok(text) = std::fs::read_to_string(entry.path())
-            {
+            if !hwmon::is_wanted_file(&name) {
+                continue;
+            }
+            let lazy = how == Open::Labels && name != "name" && !name.ends_with("_label");
+            if lazy {
+                // Only that the sensor exists, so it can be classified; never its value.
+                if name.ends_with("_input") {
+                    files.push((name, "0".to_owned()));
+                }
+            } else if let Ok(text) = std::fs::read_to_string(entry.path()) {
                 files.push((name, text));
             }
         }
@@ -142,6 +159,13 @@ impl Chip {
         files.retain(|(name, _)| {
             name == "name" || (name.starts_with(&prefix) && *name != input_name)
         });
+        if how == Open::Labels {
+            for limit in [format!("{prefix}max"), format!("{prefix}crit")] {
+                if let Ok(text) = std::fs::read_to_string(dir.join(&limit)) {
+                    files.push((limit, text));
+                }
+            }
+        }
         let input = Pread::open(&dir.join(&input_name))?;
         Some(Self {
             fixed: files,
@@ -252,7 +276,7 @@ impl Card {
             && self.chip.is_none()
             && let Some(dir) = self.chip_dir.take()
         {
-            self.chip = Chip::open(&dir);
+            self.chip = Chip::open(&dir, Open::All);
         }
         if let Some(ChipTemp::AmdGpu(c)) = self.chip.as_mut().and_then(Chip::read) {
             gpu.celsius = Some(c);
@@ -308,10 +332,14 @@ fn amd_name(device: &Path, vram_total: Option<u64>) -> String {
     gpu_name::amd_generic_name(boot_vga, vram_total).to_owned()
 }
 
-/// An `nvme` drive's hwmon chip.
+/// An `nvme` drive's hwmon chip, opened once ([`Open::Labels`]) and kept while the chip is
+/// there, so its limits are read only once.
 #[derive(Debug)]
 struct Drive {
     name: String,
+    /// The chip's hwmon directory and the canonical path of its device: which chip it is.
+    dir: PathBuf,
+    device: Option<PathBuf>,
     chip: Chip,
 }
 
@@ -329,6 +357,8 @@ pub struct Readers {
     cards: Vec<Card>,
     cpu_chip: Option<Chip>,
     drives: Vec<Drive>,
+    /// `/sys/class/hwmon`.
+    hwmon: PathBuf,
     probe: Box<dyn Probe>,
     /// When to ask the probe for NVIDIA stats (ADR 0003).
     nvml: NvmlSchedule,
@@ -361,6 +391,7 @@ impl Readers {
             cards: Vec::new(),
             cpu_chip: None,
             drives: Vec::new(),
+            hwmon: PathBuf::from("/sys/class/hwmon"),
             probe,
             nvml: NvmlSchedule::default(),
             nvml_samples: HashMap::new(),
@@ -625,12 +656,14 @@ impl Readers {
         }
     }
 
+    /// Looks for the CPU's and the drives' chips again. A drive's chip already open is kept, and
+    /// so is its last temperature: rediscovery reads nothing of a drive but its `name` file
+    /// ([`DRIVE_TEMP_EVERY`]).
     fn discover_chips(&mut self) {
         self.cpu_chip = None;
-        self.drives.clear();
-        self.drive_temps = None;
-        let root = Path::new("/sys/class/hwmon");
-        for entry in sorted_entries(root) {
+        let mut old_drives = std::mem::take(&mut self.drives);
+        let root = self.hwmon.clone();
+        for entry in sorted_entries(&root) {
             let dir = root.join(&entry);
             let device = std::fs::canonicalize(dir.join("device")).ok();
             // A GPU's chip: only its card may say when it can be read (D3).
@@ -650,10 +683,17 @@ impl Readers {
             };
             match name.trim() {
                 "k10temp" | "zenpower" | "coretemp" if self.cpu_chip.is_none() => {
-                    self.cpu_chip = Chip::open(&dir);
+                    self.cpu_chip = Chip::open(&dir, Open::All);
                 }
                 "nvme" if self.drives.len() < MAX_DRIVES => {
-                    let Some(chip) = Chip::open(&dir) else {
+                    if let Some(i) = old_drives
+                        .iter()
+                        .position(|d| d.dir == dir && d.device == device)
+                    {
+                        self.drives.push(old_drives.swap_remove(i));
+                        continue;
+                    }
+                    let Some(chip) = Chip::open(&dir, Open::Labels) else {
                         continue;
                     };
                     let name = device
@@ -667,10 +707,18 @@ impl Readers {
                                 .map(|f| clip_name(&f.to_string_lossy()))
                         })
                         .unwrap_or_else(|| clip_name(&entry));
-                    self.drives.push(Drive { name, chip });
+                    self.drives.push(Drive {
+                        name,
+                        dir,
+                        device,
+                        chip,
+                    });
                 }
                 _ => {}
             }
+        }
+        if let Some((_, temps)) = &mut self.drive_temps {
+            temps.retain(|t| self.drives.iter().any(|d| d.name == t.name));
         }
     }
 }
@@ -833,6 +881,107 @@ mod tests {
         );
         assert_eq!(*probe.asked.lock().unwrap(), 4);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A hwmon root with one `nvme` chip, `hwmon0`, its `Composite` sensor at `input` with a
+    /// `max` of `max`, removed on drop.
+    struct FakeHwmon(PathBuf);
+
+    impl FakeHwmon {
+        fn new(tag: &str, input: &str, max: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("sysmon-hwmon-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let chip = root.join("hwmon0");
+            std::fs::create_dir_all(&chip).unwrap();
+            std::fs::write(chip.join("name"), "nvme\n").unwrap();
+            std::fs::write(chip.join("temp1_label"), "Composite\n").unwrap();
+            let hwmon = Self(root);
+            hwmon.set("temp1_input", input);
+            hwmon.set("temp1_max", max);
+            hwmon
+        }
+
+        /// Rewrites `file` of the chip in place, as the kernel answers a new read.
+        fn set(&self, file: &str, text: &str) {
+            std::fs::write(self.0.join("hwmon0").join(file), format!("{text}\n")).unwrap();
+        }
+
+        fn readers(&self) -> Readers {
+            let mut readers = Readers::new(Box::new(Unavailable), VramCache::default());
+            readers.hwmon.clone_from(&self.0);
+            readers
+        }
+    }
+
+    impl Drop for FakeHwmon {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn drive(celsius: f32, limit: f32) -> DriveTemp {
+        DriveTemp {
+            name: "hwmon0".into(),
+            celsius,
+            limit: Some(limit),
+        }
+    }
+
+    #[test]
+    fn nvme_drives_are_read_every_30_s_whatever_rediscovery_does() {
+        let hwmon = FakeHwmon::new("cadence", "40000", "70000");
+        let mut readers = hwmon.readers();
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        assert_eq!(
+            readers.read(t0, Wants::default()).drives,
+            [drive(40.0, 70.0)]
+        );
+
+        hwmon.set("temp1_input", "50000");
+        hwmon.set("temp1_max", "80000");
+        // A read error elsewhere looks for devices again on the next tick, without the drive.
+        readers.failed = true;
+        assert_eq!(
+            readers.read(t0 + s(2), Wants::default()).drives,
+            [drive(40.0, 70.0)]
+        );
+        assert_eq!(
+            readers.read(t0 + s(29), Wants::default()).drives,
+            [drive(40.0, 70.0)]
+        );
+        // 30 s on: the temperature again, and the limit read once at first discovery.
+        assert_eq!(
+            readers.read(t0 + s(30), Wants::default()).drives,
+            [drive(50.0, 70.0)]
+        );
+        hwmon.set("temp1_input", "55000");
+        assert_eq!(
+            readers.read(t0 + s(60), Wants::default()).drives,
+            [drive(55.0, 70.0)]
+        );
+        // Nor does the minute's rediscovery read it.
+        hwmon.set("temp1_input", "60000");
+        assert_eq!(
+            readers.read(t0 + s(62), Wants::default()).drives,
+            [drive(55.0, 70.0)]
+        );
+    }
+
+    #[test]
+    fn an_nvme_drive_is_found_without_reading_its_temperature() {
+        // Discovery doesn't read `temp1_input`: a bad value then doesn't hide the drive.
+        let hwmon = FakeHwmon::new("discovery", "garbage", "70000");
+        let mut readers = hwmon.readers();
+        let t0 = Instant::now();
+        assert_eq!(readers.read(t0, Wants::default()).drives, []);
+        hwmon.set("temp1_input", "40000");
+        let later = t0 + Duration::from_secs(30);
+        assert_eq!(
+            readers.read(later, Wants::default()).drives,
+            [drive(40.0, 70.0)]
+        );
     }
 
     #[test]
