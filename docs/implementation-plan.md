@@ -56,7 +56,7 @@ a D-Bus round trip plus a host shell reading every `/proc/<pid>/stat`, on every 
 | NVMe temps (each read is a SMART command) | every 30 s | every 30 s |
 | AMD iGPU sysfs | ✓ | ✓ |
 | dGPU `runtime_status` | ✓ (one small read) | ✓ |
-| dGPU NVML (only when `active`) | only if `gpu` is on the bar | ✓ |
+| dGPU NVML (only when `active`; every 15 s after 3 idle samples, ADR 0003) | only if `gpu` is on the bar | ✓ |
 | Top processes | – | ✓ (probe) |
 | Mounts + space | every 30 s (probe) | every 30 s (probe) |
 
@@ -71,9 +71,11 @@ until someone asks for a setting.
 ### D3 — Never wake a suspended GPU
 
 Before touching any GPU beyond sysfs/procfs metadata, read `device/power/runtime_status`. If it's `suspended`,
-show the card as suspended and skip it. Probe-side NVML must also **release its handles** (`nvmlShutdown`)
-when it no longer needs them, because an open `/dev/nvidia*` fd stops the driver from suspending the card.
-Spike S1 checks exactly how NVML behaves here.
+show the card as suspended and skip it. Spike S1 found that every NVML call (including `nvmlInit` and
+`nvmlShutdown`) wakes a suspended card, and that calling NVML every 5 s or more often keeps an idle card
+awake, while merely holding it open does not. So the probe does init → query → shutdown per sample, only
+when the card is `active`, and backs off to one sample every 15 s once the card's load has been 0 % for 3
+samples ([ADR 0003](adr/0003-nvml-per-sample-with-idle-backoff.md)).
 
 **Why this matters:** Kai-J-G/cosmic-ext-hardware-monitor, the closest existing applet, picks "discrete
 first" at startup. On an NVIDIA machine it then runs `nvidia-smi` on every 2 s tick, popup open or not, and it does so
@@ -245,6 +247,8 @@ No `--device=all` and no `--filesystem=/sys/...`: the default `/sys` exposure wa
   (c) skip NVML and read DRM fdinfo (`drm-engine-*`, `drm-memory-*`) from the probe's process scan, if
   the 620 open kernel module exposes it.
   Record the result as an ADR.
+  **Result:** every NVML call wakes a suspended card; open handles don't pin it, but calls every ≤ 5 s do;
+  no fdinfo on this driver. (b) with an idle back-off ([ADR 0003](adr/0003-nvml-per-sample-with-idle-backoff.md)).
 - **S2 — static probe in flatpak-builder** (before P2). Is the musl target available in
   `org.freedesktop.Sdk.Extension.rust-stable`? If not, find the least bad alternative (e.g. build against an old glibc
   baseline).
@@ -291,11 +295,12 @@ Each phase ends with something runnable and with its checks passing.
 - **Done when:** it matches the reference screenshot's layout and content on the reference laptop with the dGPU suspended.
 
 ### P4 — GPUs
-- Spike S1, then NVIDIA via the probe, gated on `runtime_status`. VRAM cache (D4). Multiple GPUs, NVIDIA first.
-  `gpu` on the bar means "first awake GPU, NVIDIA first".
+- Spike S1, then NVIDIA via the probe, gated on `runtime_status`, with the idle back-off of ADR 0003. VRAM
+  cache (D4). Multiple GPUs, NVIDIA first. `gpu` on the bar means "first awake GPU, NVIDIA first".
 - **Done when:**
   - running a GPU load with `prime-run` shows live NVIDIA stats
-  - after the load ends, the card suspends again within its normal autosuspend delay, with the popup **open**
+  - after the load ends, the card suspends again with the popup **open**: the back-off kicks in after 3 idle
+    samples, then the card's own delay (S1 measured 20 s minimum awake, then 5–12 s after the last activity)
   - while suspended, it shows `0 / 8G`
 
 ### P5 — Settings page and warnings
