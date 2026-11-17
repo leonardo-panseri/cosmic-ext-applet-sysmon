@@ -7,9 +7,17 @@
   <summary>CPU, memory, GPU, disk and network at a glance in the COSMIC™ panel</summary>
   <description>
     <p>
-      A panel applet that shows system usage in the COSMIC panel. It is an early scaffold: the panel
-      button shows placeholder text and the popup is empty.
+      A panel applet that shows CPU, memory, GPU, disk and network use at a glance, and costs close to
+      nothing while you're not looking at it.
     </p>
+    <ul>
+      <li>One or two rows in the panel, with download and upload rates, in three layouts</li>
+      <li>Rows turn red when a temperature, memory or a disk crosses its limit</li>
+      <li>A popup with 2-minute graphs, per-core load, every GPU, network interface, mount and NVMe drive,
+        and the top processes by CPU and memory</li>
+      <li>Never wakes a suspended discrete GPU, so hybrid laptops keep their battery life</li>
+      <li>Opens COSMIC's System Monitor from the popup or with a right click</li>
+    </ul>
   </description>
   <developer id="io.github.leonardo_panseri">
     <name>Leonardo Panseri</name>
@@ -18,6 +26,20 @@
   <url type="homepage">https://github.com/leonardo-panseri/cosmic-ext-applet-sysmon</url>
   <url type="bugtracker">https://github.com/leonardo-panseri/cosmic-ext-applet-sysmon/issues</url>
   <url type="vcs-browser">https://github.com/leonardo-panseri/cosmic-ext-applet-sysmon</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/leonardo-panseri/cosmic-ext-applet-sysmon/main/resources/screenshots/popup.png</image>
+      <caption>The panel button and the popup</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/leonardo-panseri/cosmic-ext-applet-sysmon/main/resources/screenshots/popup-full.png</image>
+      <caption>Every section of the popup: CPU, memory, GPUs, network, disks and processes</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/leonardo-panseri/cosmic-ext-applet-sysmon/main/resources/screenshots/settings.png</image>
+      <caption>Choosing what the panel button shows and when it warns</caption>
+    </screenshot>
+  </screenshots>
   <launchable type="desktop-id">io.github.leonardo_panseri.cosmic-ext-applet-sysmon.desktop</launchable>
   <provides>
     <id>com.system76.CosmicApplet</id>
@@ -35,6 +57,9 @@
   </categories>
   <keywords>
     <keyword>COSMIC</keyword>
+    <keyword>system monitor</keyword>
+    <keyword>CPU</keyword>
+    <keyword>GPU</keyword>
   </keywords>
   <content_rating type="oars-1.1" />
 </component>
