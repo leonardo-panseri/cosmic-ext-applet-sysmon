@@ -955,8 +955,10 @@ dependencies = [
  "i18n-embed-fl",
  "libcosmic",
  "rust-embed",
+ "serde",
  "sysmon-probe",
  "sysmon-proto",
+ "tempfile",
  "xdgen",
  "zbus 6.3.0",
 ]

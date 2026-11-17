@@ -266,6 +266,59 @@ mod tests {
     }
 
     #[test]
+    fn the_micron_drive_gets_a_sane_limit() {
+        // Its bogus 65261 °C `max` is on "Sensor 1", which isn't used; the Composite sensor
+        // has a sane `max` below its `crit`.
+        let chip = chip("hwmon4_nvme");
+        let (sensor, temp) = classify_sensor(&chip).unwrap();
+        assert_eq!((sensor.max, sensor.crit), (Some(86.85), Some(89.85)));
+        let ChipTemp::Nvme {
+            limit: Some(limit), ..
+        } = temp
+        else {
+            panic!("{temp:?}");
+        };
+        assert!((60.0..=100.0).contains(&limit), "{limit}");
+    }
+
+    #[test]
+    fn an_implausible_max_on_the_composite_falls_back_to_crit() {
+        let chip = parse_chip([
+            ("name", "nvme\n"),
+            ("temp1_label", "Composite\n"),
+            ("temp1_input", "41850\n"),
+            ("temp1_max", "65261850\n"),
+            ("temp1_crit", "84850\n"),
+        ])
+        .unwrap();
+        assert_eq!(
+            classify(&chip),
+            Some(ChipTemp::Nvme {
+                celsius: 41.85,
+                limit: Some(84.85)
+            })
+        );
+    }
+
+    #[test]
+    fn an_nvme_drive_without_plausible_limits_has_none() {
+        let chip = parse_chip([
+            ("name", "nvme\n"),
+            ("temp1_label", "Composite\n"),
+            ("temp1_input", "41850\n"),
+            ("temp1_max", "65261850\n"),
+        ])
+        .unwrap();
+        assert_eq!(
+            classify(&chip),
+            Some(ChipTemp::Nvme {
+                celsius: 41.85,
+                limit: None
+            })
+        );
+    }
+
+    #[test]
     fn chips_that_are_not_cpu_gpu_or_nvme_are_unclassified() {
         assert_eq!(classify(&chip("hwmon1_acpitz")), None);
         assert_eq!(classify(&chip("hwmon6_spd5118")), None);

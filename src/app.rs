@@ -14,9 +14,10 @@ use cosmic::widget;
 use crate::panel::{PanelSettings, PanelSummary};
 use crate::sampler::stats::Stats;
 use crate::sampler::{self, Control, SamplerHandle, Update};
-use crate::ui::panel_button::panel_button;
+use crate::ui::panel_button::{self, panel_button};
 use crate::ui::popup::{self, Page};
-use crate::{launch, upower};
+use crate::ui::settings::{SettingChange, SettingsModels};
+use crate::{config, launch, upower};
 
 /// The applet's state.
 pub struct AppModel {
@@ -26,8 +27,13 @@ pub struct AppModel {
     popup: Option<Id>,
     /// The popup's page.
     page: Page,
-    /// The panel button's settings; loaded from cosmic-config in P5.
+    /// The panel button's settings, as stored.
     settings: PanelSettings,
+    /// The stored settings; `None` when the config can't be opened, so changes last only until
+    /// a restart.
+    config: Option<cosmic::cosmic_config::Config>,
+    /// The settings page's segmented controls, kept in step with `settings`.
+    models: SettingsModels,
     /// The sampler's control channel, once it has started.
     sampler: Option<SamplerHandle>,
     /// What the panel button shows, including the active warnings; `None` before the first sample.
@@ -50,6 +56,12 @@ pub enum Message {
     SamplerStarted(SamplerHandle),
     /// The sampler has something new to show.
     Sampled(Update),
+    /// A change on the settings page.
+    Setting(SettingChange),
+    /// The stored settings changed, for example from the applet on another panel.
+    ConfigChanged(PanelSettings),
+    /// The panel button's tooltip opens or closes its surface.
+    Surface(cosmic::surface::Action<Message>),
 }
 
 impl AppModel {
@@ -57,6 +69,19 @@ impl AppModel {
         if let Some(sampler) = &self.sampler {
             sampler.send(Control::PopupOpen(self.popup.is_some()));
         }
+    }
+
+    /// Shows `settings` and tells the sampler, which sends the panel button's new summary at
+    /// once if it changes.
+    fn apply_settings(&mut self, settings: PanelSettings) {
+        if settings == self.settings {
+            return;
+        }
+        self.models.select(&settings);
+        if let Some(sampler) = &self.sampler {
+            sampler.send(Control::Settings(settings.clone()));
+        }
+        self.settings = settings;
     }
 }
 
@@ -81,11 +106,15 @@ impl cosmic::Application for AppModel {
         core: cosmic::Core,
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
+        let (config, settings) = config::load(Self::APP_ID);
+        config::log("loaded", &settings);
         let app = AppModel {
             core,
             popup: None,
             page: Page::Stats,
-            settings: PanelSettings::default(),
+            models: SettingsModels::new(&settings),
+            settings,
+            config,
             sampler: None,
             panel: None,
             stats: None,
@@ -98,7 +127,11 @@ impl cosmic::Application for AppModel {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        Subscription::run(sampler_messages)
+        let config = self
+            .core
+            .watch_config::<PanelSettings>(Self::APP_ID)
+            .map(|update| Message::ConfigChanged(update.config));
+        Subscription::batch([Subscription::run(sampler_messages), config])
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
@@ -107,6 +140,13 @@ impl cosmic::Application for AppModel {
         // area lays out as its content, so it changes neither the size nor the hover highlight.
         let button = widget::mouse_area(panel_button(applet, &self.settings, self.panel.as_ref()))
             .on_right_press(Message::OpenProcessMonitor);
+        // The tooltip lists the warnings. It only watches the cursor and passes every event on,
+        // so both clicks still reach the button and the mouse area. It is always there, only
+        // without a surface to show when there is nothing to say, so the widget tree keeps its
+        // shape when warnings come and go, and an open tooltip still closes on leaving.
+        let tooltip = panel_button::tooltip(self.panel.as_ref());
+        let silent = self.popup.is_some() || tooltip.is_empty();
+        let button = applet.applet_tooltip(button, tooltip, silent, Message::Surface, None);
         // Without the autosize wrapper the panel clips the button to icon size.
         applet.autosize_window(button).into()
     }
@@ -115,6 +155,7 @@ impl cosmic::Application for AppModel {
         let content = popup::view(
             self.stats.as_deref(),
             &self.settings,
+            &self.models,
             self.page,
             popup::PAGE_MAX_HEIGHT,
         );
@@ -161,13 +202,34 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::SamplerStarted(handle) => {
+                // The popup may have opened, or the settings changed, before the sampler
+                // started. It started with the stored settings; a change since is sent here.
+                handle.send(Control::Settings(self.settings.clone()));
                 self.sampler = Some(handle);
-                // The popup may have opened before the sampler started.
                 self.popup_changed();
             }
             Message::Sampled(update) => {
                 self.panel = Some(update.panel);
                 self.stats = Some(update.stats);
+            }
+            Message::Setting(change) => {
+                let settings = self.models.changed(change, &self.settings);
+                if let Some(config) = &self.config {
+                    let mut stored = self.settings.clone();
+                    config::store(config, &mut stored, &settings);
+                }
+                config::log("changed", &settings);
+                self.apply_settings(settings);
+            }
+            Message::ConfigChanged(settings) => {
+                let settings = settings.clamped();
+                if settings != self.settings {
+                    config::log("changed elsewhere", &settings);
+                }
+                self.apply_settings(settings);
+            }
+            Message::Surface(action) => {
+                return cosmic::task::message(cosmic::Action::Surface(action));
             }
         }
         Task::none()
@@ -182,8 +244,9 @@ impl cosmic::Application for AppModel {
 /// tells the sampler when the machine goes on or off battery, without going through `update()`.
 fn sampler_messages() -> impl Stream<Item = Message> {
     cosmic::iced::stream::channel(1, async |mut output| {
-        // P5 restarts the subscription with the configured settings.
-        let (sampler, mut updates) = sampler::spawn(PanelSettings::default());
+        // The stored settings as `init` read them; a change since follows as a control message.
+        let (_, settings) = config::load(<AppModel as cosmic::Application>::APP_ID);
+        let (sampler, mut updates) = sampler::spawn(settings);
         if output
             .send(Message::SamplerStarted(sampler.clone()))
             .await

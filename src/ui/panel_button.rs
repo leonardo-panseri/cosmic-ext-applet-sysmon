@@ -14,7 +14,7 @@ use cosmic::widget;
 
 use crate::app::Message;
 use crate::fl;
-use crate::panel::{Layout, PanelSettings, PanelSummary, RowKind, format};
+use crate::panel::{Layout, PanelSettings, PanelSummary, RowKind, Warning, format};
 
 /// Line height of the panel text, relative to its size.
 const LINE_HEIGHT: f32 = 1.2;
@@ -152,6 +152,61 @@ pub fn panel_button<'a>(
     button.on_press_down(Message::TogglePopup)
 }
 
+/// The panel button's tooltip: the active warnings, one per line. Empty without warnings.
+#[must_use]
+pub fn tooltip(summary: Option<&PanelSummary>) -> String {
+    let lines: Vec<String> = summary
+        .into_iter()
+        .flat_map(|s| s.warnings.iter().map(warning_text))
+        .collect();
+    lines.join("\n")
+}
+
+fn warning_text(warning: &Warning) -> String {
+    match warning.clone() {
+        Warning::CpuTemp { celsius, limit } => {
+            fl!("warning-cpu-temp", celsius = celsius, limit = limit)
+        }
+        Warning::GpuTemp {
+            card,
+            name,
+            celsius,
+            limit,
+        } => {
+            let gpu = name.unwrap_or_else(|| fl!("gpu-unnamed", card = card));
+            fl!(
+                "warning-gpu-temp",
+                gpu = gpu,
+                celsius = celsius,
+                limit = limit
+            )
+        }
+        Warning::Memory { percent, limit } => {
+            fl!("warning-memory", percent = percent, limit = limit)
+        }
+        Warning::Filesystem {
+            mount,
+            percent,
+            limit,
+        } => fl!(
+            "warning-filesystem",
+            mount = mount,
+            percent = percent,
+            limit = limit
+        ),
+        Warning::Nvme {
+            drive,
+            celsius,
+            limit,
+        } => fl!(
+            "warning-nvme",
+            drive = drive,
+            celsius = celsius,
+            limit = limit
+        ),
+    }
+}
+
 fn label(kind: RowKind) -> String {
     match kind {
         RowKind::Cpu => fl!("cpu"),
@@ -216,5 +271,72 @@ fn panel_text<'a>(
         }))
     } else {
         text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `text` without Fluent's bidi isolation marks around arguments.
+    fn plain(text: &str) -> String {
+        text.replace(['\u{2068}', '\u{2069}'], "")
+    }
+
+    #[test]
+    fn the_tooltip_lists_each_warning_on_its_own_line() {
+        let summary = PanelSummary {
+            top: None,
+            bottom: None,
+            down: None,
+            up: None,
+            warnings: vec![
+                Warning::CpuTemp {
+                    celsius: 91,
+                    limit: 85,
+                },
+                Warning::GpuTemp {
+                    card: "card1".into(),
+                    name: None,
+                    celsius: 88,
+                    limit: 85,
+                },
+                Warning::Memory {
+                    percent: 93,
+                    limit: 90,
+                },
+                Warning::Filesystem {
+                    mount: "/mnt/storage".into(),
+                    percent: 97,
+                    limit: 90,
+                },
+                Warning::Nvme {
+                    drive: "Samsung SSD 980 PRO".into(),
+                    celsius: 74,
+                    limit: 70,
+                },
+            ],
+        };
+        assert_eq!(
+            plain(&tooltip(Some(&summary))),
+            "CPU at 91°C, limit 85°C\n\
+             GPU card1 at 88°C, limit 85°C\n\
+             Memory 93% full, limit 90%\n\
+             /mnt/storage 97% full, limit 90%\n\
+             Samsung SSD 980 PRO at 74°C, its limit 70°C"
+        );
+    }
+
+    #[test]
+    fn no_warnings_no_tooltip() {
+        assert_eq!(tooltip(None), "");
+        let summary = PanelSummary {
+            top: Some("12%".into()),
+            bottom: None,
+            down: None,
+            up: None,
+            warnings: vec![],
+        };
+        assert_eq!(tooltip(Some(&summary)), "");
     }
 }

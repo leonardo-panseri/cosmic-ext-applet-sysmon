@@ -17,11 +17,17 @@ xdgen = "0.1"
 [dependencies]
 i18n-embed-fl = "0.10"
 rust-embed = "8.11"
+# Already in the tree through libcosmic; for the settings stored with cosmic-config (§2.3).
+serde = { version = "1.0", features = ["derive"] }
 # The probe's protocol, and its logic for the in-process backend outside a Flatpak (§3.2).
 sysmon-probe = { path = "crates/sysmon-probe" }
 sysmon-proto = { path = "crates/sysmon-proto" }
 # Already in the tree through libcosmic, with the same features; for UPower `OnBattery` (D2).
 zbus = { version = "6.3", default-features = false, features = ["proxy", "tokio"] }
+
+[dev-dependencies]
+# Already in the tree; a scratch config directory for the cosmic-config round trip.
+tempfile = "3"
 
 [dependencies.i18n-embed]
 version = "0.16"

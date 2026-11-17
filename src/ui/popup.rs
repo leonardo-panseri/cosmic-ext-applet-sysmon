@@ -18,6 +18,7 @@ use crate::panel::{PanelSettings, format};
 use crate::sampler::stats::{GpuSample, Stats};
 use crate::sources::drm::RuntimeStatus;
 use crate::ui::graph;
+use crate::ui::settings::{self, SettingsModels};
 use sysmon_proto::Process;
 
 /// The stats page scrolls beyond this, so the popup stays on screen with the footer.
@@ -37,15 +38,17 @@ const MUTED_ALPHA: f32 = 0.65;
 pub enum Page {
     #[default]
     Stats,
-    /// A placeholder until P5.
+    /// The panel button's settings (§2.3).
     Settings,
 }
 
 /// The popup's content: `page`, for `stats` (`None` before the first sample), with values at or
-/// above `settings`' limits in the warning colour. The stats page scrolls beyond `max_height`.
+/// above `settings`' limits in the warning colour. The stats page scrolls beyond `max_height`;
+/// the settings page shows `settings` with the segmented controls of `models`.
 pub fn view<'a>(
     stats: Option<&'a Stats>,
     settings: &PanelSettings,
+    models: &'a SettingsModels,
     page: Page,
     max_height: f32,
 ) -> Element<'a, Message> {
@@ -63,7 +66,7 @@ pub fn view<'a>(
                 .spacing(spacing.space_s)
                 .into()
         }
-        Page::Settings => widget::container(settings_page())
+        Page::Settings => widget::container(settings::view(models, settings))
             .padding([0, spacing.space_s])
             .into(),
     };
@@ -154,7 +157,7 @@ fn cpu<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> {
     if let Some(temp) = stats.cpu_temp {
         right = right.push(warn_if(
             widget::text::body(format::celsius(temp)),
-            temp >= settings.warn_temp,
+            settings.hot(temp),
         ));
     }
     widget::Column::new()
@@ -179,7 +182,7 @@ fn memory<'a>(stats: &Stats, settings: &PanelSettings) -> Element<'a, Message> {
             memory_icon(),
             fl!("in-use"),
             used_of_total(mem.mem_used(), mem.mem_total),
-            percent.map(|p| (format::percent(p), p >= settings.warn_usage)),
+            percent.map(|p| (format::percent(p), settings.full(p))),
         ));
         let swap = share(mem.swap_used(), mem.swap_total).unwrap_or(0.0);
         rows.push(stat_row(
@@ -246,7 +249,7 @@ fn gpu_header<'a>(gpu: &GpuSample, settings: &PanelSettings) -> Element<'a, Mess
             parts.push(
                 warn_if(
                     widget::text::body(format::celsius(temp)),
-                    temp >= settings.warn_temp,
+                    settings.hot(temp),
                 )
                 .into(),
             );
@@ -332,7 +335,7 @@ fn disk<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> 
             named_icon("folder-symbolic"),
             mount.mount_point.clone(),
             used_of_total(mount.used, mount.total),
-            percent.map(|p| (format::percent(p), p >= settings.warn_usage)),
+            percent.map(|p| (format::percent(p), settings.full(p))),
         ));
     }
     for drive in &stats.drives {
@@ -411,7 +414,11 @@ fn footer<'a>() -> Element<'a, Message> {
 
 /// A standard button taking an equal share of the row, its icon and label centred. libcosmic's
 /// text button can't fill its width.
-fn footer_button<'a>(icon: &'static str, label: String, message: Message) -> Element<'a, Message> {
+pub(super) fn footer_button<'a>(
+    icon: &'static str,
+    label: String,
+    message: Message,
+) -> Element<'a, Message> {
     let spacing = cosmic::theme::spacing();
     let content = widget::Row::new()
         .spacing(spacing.space_xxs)
@@ -426,23 +433,8 @@ fn footer_button<'a>(icon: &'static str, label: String, message: Message) -> Ele
         .into()
 }
 
-/// A placeholder with a way back, until the settings page of P5.
-fn settings_page<'a>() -> Element<'a, Message> {
-    let spacing = cosmic::theme::spacing();
-    widget::Column::new()
-        .spacing(spacing.space_s)
-        .push(
-            widget::button::text(fl!("back"))
-                .leading_icon(icon::from_name("go-previous-symbolic"))
-                .on_press(Message::ShowPage(Page::Stats)),
-        )
-        .push(widget::text::title4(fl!("settings")))
-        .push(muted(widget::text::body(fl!("settings-placeholder"))))
-        .into()
-}
-
 /// A section: its small header (none for an empty `title`), then `rows`.
-fn section(title: String, rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
+pub(super) fn section(title: String, rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
     let spacing = cosmic::theme::spacing();
     widget::Column::new()
         .spacing(spacing.space_xxxs)

@@ -5,3 +5,4 @@
 pub mod graph;
 pub mod panel_button;
 pub mod popup;
+pub mod settings;

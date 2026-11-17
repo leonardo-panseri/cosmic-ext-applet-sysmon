@@ -6,22 +6,31 @@
 
 pub mod format;
 
+use std::ops::RangeInclusive;
+
+use cosmic::cosmic_config::{self, CosmicConfigEntry, cosmic_config_derive::CosmicConfigEntry};
+use serde::{Deserialize, Serialize};
+
 use crate::sampler::stats::Stats;
 
 /// How the panel button lays out its rows (§2.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Layout {
     /// Two small rows in one panel slot, with the network rates beside them.
     Stacked,
     /// Both values and the network rates on one line.
-    #[allow(dead_code, reason = "chosen on the settings page (P5)")]
     OneLine,
     /// Only the top value. Vertical panels always use it.
     Compact,
 }
 
+impl Layout {
+    /// Every layout, in the settings page's order.
+    pub const ALL: [Self; 3] = [Self::Stacked, Self::OneLine, Self::Compact];
+}
+
 /// What a panel row shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RowKind {
     /// CPU load, %.
     Cpu,
@@ -32,11 +41,19 @@ pub enum RowKind {
     /// The root filesystem's used space, %, as in the reference.
     Disk,
     /// CPU package temperature, °C.
-    #[allow(dead_code, reason = "chosen on the settings page (P5)")]
     CpuTemp,
 }
 
 impl RowKind {
+    /// Every row kind, in the settings page's order.
+    pub const ALL: [Self; 5] = [
+        Self::Cpu,
+        Self::Memory,
+        Self::Gpu,
+        Self::Disk,
+        Self::CpuTemp,
+    ];
+
     /// The widest text this row's value can have, which sizes its cell (D6).
     #[must_use]
     pub fn widest_value(self) -> &'static str {
@@ -47,8 +64,15 @@ impl RowKind {
     }
 }
 
-/// The panel button's settings. These are the defaults of §2.3; P5 loads them from cosmic-config.
-#[derive(Debug, Clone, PartialEq)]
+/// The temperatures the settings page offers as `warn_temp`, °C.
+pub const WARN_TEMP_RANGE: RangeInclusive<u8> = 50..=110;
+/// The shares the settings page offers as `warn_usage`, %.
+pub const WARN_USAGE_RANGE: RangeInclusive<u8> = 50..=100;
+
+/// The panel button's settings (§2.3), stored with cosmic-config as one key per field in
+/// `~/.config/cosmic/<app id>/v1/`. Changed on the popup's settings page.
+#[derive(Debug, Clone, PartialEq, Eq, CosmicConfigEntry)]
+#[version = 1]
 pub struct PanelSettings {
     pub layout: Layout,
     pub top: RowKind,
@@ -56,9 +80,9 @@ pub struct PanelSettings {
     /// Whether the network rates are shown.
     pub network: bool,
     /// CPU and GPU temperatures at or above this warn, °C.
-    pub warn_temp: f32,
+    pub warn_temp: u8,
     /// Memory or a filesystem at or above this share warns, %.
-    pub warn_usage: f32,
+    pub warn_usage: u8,
 }
 
 impl Default for PanelSettings {
@@ -68,13 +92,26 @@ impl Default for PanelSettings {
             top: RowKind::Cpu,
             bottom: RowKind::Memory,
             network: true,
-            warn_temp: 85.0,
-            warn_usage: 90.0,
+            warn_temp: 85,
+            warn_usage: 90,
         }
     }
 }
 
 impl PanelSettings {
+    /// These settings with the limits inside the ranges the settings page offers, for values
+    /// written to the config by hand.
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        let clamp =
+            |value: u8, range: &RangeInclusive<u8>| value.clamp(*range.start(), *range.end());
+        Self {
+            warn_temp: clamp(self.warn_temp, &WARN_TEMP_RANGE),
+            warn_usage: clamp(self.warn_usage, &WARN_USAGE_RANGE),
+            ..self
+        }
+    }
+
     /// The layout actually used: vertical panels only fit [`Layout::Compact`].
     #[must_use]
     pub fn layout_for(&self, horizontal: bool) -> Layout {
@@ -93,79 +130,115 @@ impl PanelSettings {
             Layout::Compact => vec![self.top],
         }
     }
+
+    /// Whether a CPU or GPU temperature warns.
+    #[must_use]
+    pub fn hot(&self, celsius: f32) -> bool {
+        celsius >= f32::from(self.warn_temp)
+    }
+
+    /// Whether memory or a filesystem this full, %, warns.
+    #[must_use]
+    pub fn full(&self, percent: f32) -> bool {
+        percent >= f32::from(self.warn_usage)
+    }
 }
 
-/// A value at or above its limit (§2.1).
+/// A value at or above its limit (§2.1), with both rounded to whole units for the tooltip.
+/// Rounded, so a value moving within a degree or a percent doesn't make a new summary (D6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Warning {
-    CpuTemp,
-    /// A GPU, by DRM card.
+    /// The CPU package, °C.
+    CpuTemp { celsius: i32, limit: i32 },
+    /// A GPU, by DRM card, with its model when known; °C.
     GpuTemp {
         card: String,
+        name: Option<String>,
+        celsius: i32,
+        limit: i32,
     },
-    Memory,
-    /// A filesystem, by mount point.
+    /// Memory in use, %.
+    Memory { percent: i32, limit: i32 },
+    /// A filesystem, by mount point; % full.
     Filesystem {
         mount: String,
+        percent: i32,
+        limit: i32,
     },
-    /// An `nvme` drive at or above its own rated limit, by name.
+    /// An `nvme` drive, by name, against its own rated limit; °C.
     Nvme {
         drive: String,
+        celsius: i32,
+        limit: i32,
     },
 }
 
 impl Warning {
-    /// Whether a row showing `kind` is about the same part, so it takes this warning's colour.
+    /// Whether a row showing `kind` shows the value this warning is about, so it takes the
+    /// warning's colour. The CPU and GPU rows show load, which has no limit; the Disk row shows
+    /// only the root filesystem.
     #[must_use]
     pub fn colours(&self, kind: RowKind) -> bool {
         match self {
-            Self::CpuTemp => matches!(kind, RowKind::Cpu | RowKind::CpuTemp),
-            Self::GpuTemp { .. } => kind == RowKind::Gpu,
-            Self::Memory => kind == RowKind::Memory,
-            Self::Filesystem { .. } | Self::Nvme { .. } => kind == RowKind::Disk,
+            Self::CpuTemp { .. } => kind == RowKind::CpuTemp,
+            Self::Memory { .. } => kind == RowKind::Memory,
+            Self::Filesystem { mount, .. } => kind == RowKind::Disk && mount == "/",
+            Self::GpuTemp { .. } | Self::Nvme { .. } => false,
         }
     }
+}
+
+/// `value` rounded to a whole number, as the panel and the tooltip show it.
+fn whole(value: f32) -> i32 {
+    // Temperatures and percentages, far inside i32.
+    #[expect(clippy::cast_possible_truncation, reason = "see above")]
+    let whole = value.round() as i32;
+    whole
 }
 
 /// Every warning `stats` raises under `settings`' limits.
 #[must_use]
 pub fn warnings(stats: &Stats, settings: &PanelSettings) -> Vec<Warning> {
-    let hot = |c: f32| c >= settings.warn_temp;
-    let full = |p: f32| p >= settings.warn_usage;
+    let temp_limit = i32::from(settings.warn_temp);
+    let usage_limit = i32::from(settings.warn_usage);
     let mut warnings = Vec::new();
-    if stats.cpu_temp.is_some_and(hot) {
-        warnings.push(Warning::CpuTemp);
+    if let Some(celsius) = stats.cpu_temp.filter(|&c| settings.hot(c)) {
+        warnings.push(Warning::CpuTemp {
+            celsius: whole(celsius),
+            limit: temp_limit,
+        });
     }
-    warnings.extend(
-        stats
-            .gpus
-            .iter()
-            .filter(|g| g.celsius.is_some_and(hot))
-            .map(|g| Warning::GpuTemp {
-                card: g.card.clone(),
-            }),
-    );
-    if stats.memory_percent().is_some_and(full) {
-        warnings.push(Warning::Memory);
+    warnings.extend(stats.gpus.iter().filter_map(|g| {
+        let celsius = g.celsius.filter(|&c| settings.hot(c))?;
+        Some(Warning::GpuTemp {
+            card: g.card.clone(),
+            name: g.name.clone(),
+            celsius: whole(celsius),
+            limit: temp_limit,
+        })
+    }));
+    if let Some(percent) = stats.memory_percent().filter(|&p| settings.full(p)) {
+        warnings.push(Warning::Memory {
+            percent: whole(percent),
+            limit: usage_limit,
+        });
     }
-    warnings.extend(
-        stats
-            .mounts
-            .iter()
-            .filter(|m| m.used_percent().is_some_and(full))
-            .map(|m| Warning::Filesystem {
-                mount: m.mount_point.clone(),
-            }),
-    );
-    warnings.extend(
-        stats
-            .drives
-            .iter()
-            .filter(|d| d.limit.is_some_and(|limit| d.celsius >= limit))
-            .map(|d| Warning::Nvme {
-                drive: d.name.clone(),
-            }),
-    );
+    warnings.extend(stats.mounts.iter().filter_map(|m| {
+        let percent = m.used_percent().filter(|&p| settings.full(p))?;
+        Some(Warning::Filesystem {
+            mount: m.mount_point.clone(),
+            percent: whole(percent),
+            limit: usage_limit,
+        })
+    }));
+    warnings.extend(stats.drives.iter().filter_map(|d| {
+        let limit = d.limit.filter(|&limit| d.celsius >= limit)?;
+        Some(Warning::Nvme {
+            drive: d.name.clone(),
+            celsius: whole(d.celsius),
+            limit: whole(limit),
+        })
+    }));
     warnings
 }
 
@@ -177,6 +250,7 @@ pub struct PanelSummary {
     /// Network download and upload; both `None` when the rates are hidden.
     pub down: Option<String>,
     pub up: Option<String>,
+    /// Also listed in the panel button's tooltip.
     pub warnings: Vec<Warning>,
 }
 
@@ -201,14 +275,15 @@ impl PanelSummary {
         }
     }
 
-    /// Whether a row showing `kind` takes the warning colour.
+    /// Whether a row showing `kind` takes the warning colour: its own value is at or above its
+    /// limit.
     #[must_use]
     pub fn row_warns(&self, kind: RowKind) -> bool {
         self.warnings.iter().any(|w| w.colours(kind))
     }
 
-    /// Whether the whole button takes the warning colour: some warning is about a part none of
-    /// the `shown` rows is about.
+    /// Whether the whole button takes the warning colour: some warning is about a value none of
+    /// the `shown` rows shows.
     #[must_use]
     pub fn button_warns(&self, shown: &[RowKind]) -> bool {
         self.warnings
@@ -352,29 +427,183 @@ mod tests {
         assert_eq!(
             warnings(&stats, &PanelSettings::default()),
             [
-                Warning::CpuTemp,
-                Warning::Memory,
+                Warning::CpuTemp {
+                    celsius: 85,
+                    limit: 85
+                },
+                Warning::Memory {
+                    percent: 90,
+                    limit: 90
+                },
                 Warning::Filesystem {
-                    mount: "/mnt/storage".into()
+                    mount: "/mnt/storage".into(),
+                    percent: 90,
+                    limit: 90
                 },
                 Warning::Nvme {
-                    drive: "Fast SSD".into()
+                    drive: "Fast SSD".into(),
+                    celsius: 70,
+                    limit: 70
                 },
             ]
         );
     }
 
     #[test]
-    fn a_warning_colours_its_row_when_shown_and_the_button_otherwise() {
+    fn a_gpu_warning_names_the_card_and_its_model() {
+        let mut nvidia = amd_gpu(10, 91.4);
+        nvidia.card = "card0".into();
+        nvidia.name = Some("RTX 4060".into());
         let stats = Stats {
-            cpu_temp: Some(90.0),
+            gpus: vec![nvidia],
             ..Stats::default()
         };
-        let summary = PanelSummary::new(&stats, &PanelSettings::default());
-        assert!(summary.row_warns(RowKind::Cpu));
-        assert!(!summary.row_warns(RowKind::Memory));
-        assert!(!summary.button_warns(&[RowKind::Cpu, RowKind::Memory]));
-        assert!(summary.button_warns(&[RowKind::Memory, RowKind::Disk]));
+        assert_eq!(
+            warnings(&stats, &PanelSettings::default()),
+            [Warning::GpuTemp {
+                card: "card0".into(),
+                name: Some("RTX 4060".into()),
+                celsius: 91,
+                limit: 85
+            }]
+        );
+    }
+
+    #[test]
+    fn the_limits_come_from_the_settings() {
+        let stats = Stats {
+            cpu_temp: Some(72.0),
+            mem: Some(memory(60)),
+            ..Stats::default()
+        };
+        assert_eq!(warnings(&stats, &PanelSettings::default()), Vec::new());
+        let strict = PanelSettings {
+            warn_temp: 70,
+            warn_usage: 60,
+            ..PanelSettings::default()
+        };
+        assert_eq!(
+            warnings(&stats, &strict),
+            [
+                Warning::CpuTemp {
+                    celsius: 72,
+                    limit: 70
+                },
+                Warning::Memory {
+                    percent: 60,
+                    limit: 60
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn values_moving_within_a_degree_keep_the_same_summary() {
+        let at = |celsius| {
+            PanelSummary::new(
+                &Stats {
+                    cpu_temp: Some(celsius),
+                    ..Stats::default()
+                },
+                &PanelSettings::default(),
+            )
+        };
+        assert_eq!(at(90.1), at(90.4));
+        assert_ne!(at(90.4), at(90.6));
+    }
+
+    /// The default rows: CPU load over memory.
+    const DEFAULT_ROWS: [RowKind; 2] = [RowKind::Cpu, RowKind::Memory];
+
+    fn summary(stats: &Stats) -> PanelSummary {
+        PanelSummary::new(stats, &PanelSettings::default())
+    }
+
+    #[test]
+    fn memory_colours_its_own_row() {
+        let summary = summary(&Stats {
+            mem: Some(memory(95)),
+            ..Stats::default()
+        });
+        assert!(summary.row_warns(RowKind::Memory));
+        assert!(!summary.row_warns(RowKind::Cpu));
+        assert!(!summary.button_warns(&DEFAULT_ROWS));
+        // Off the bar: the whole button.
+        assert!(summary.button_warns(&[RowKind::Cpu, RowKind::Disk]));
+        assert!(summary.button_warns(&[RowKind::Cpu]));
+    }
+
+    #[test]
+    fn cpu_temperature_colours_only_the_temperature_row() {
+        let summary = summary(&Stats {
+            cpu_temp: Some(90.0),
+            ..Stats::default()
+        });
+        // The CPU row shows load, which has no limit: the warning isn't on the bar.
+        assert!(!summary.row_warns(RowKind::Cpu));
+        assert!(summary.button_warns(&DEFAULT_ROWS));
+        assert!(summary.row_warns(RowKind::CpuTemp));
+        assert!(!summary.button_warns(&[RowKind::Cpu, RowKind::CpuTemp]));
+    }
+
+    #[test]
+    fn only_the_root_filesystem_colours_the_disk_row() {
+        let root = summary(&Stats {
+            mounts: vec![mount("/", 95)],
+            ..Stats::default()
+        });
+        assert!(root.row_warns(RowKind::Disk));
+        assert!(!root.button_warns(&[RowKind::Cpu, RowKind::Disk]));
+        assert!(root.button_warns(&DEFAULT_ROWS));
+
+        let other = summary(&Stats {
+            mounts: vec![mount("/", 40), mount("/mnt/storage", 97)],
+            ..Stats::default()
+        });
+        assert!(!other.row_warns(RowKind::Disk));
+        assert!(other.button_warns(&[RowKind::Cpu, RowKind::Disk]));
+    }
+
+    #[test]
+    fn gpu_and_nvme_temperatures_are_never_on_the_bar() {
+        let summary = summary(&Stats {
+            gpus: vec![amd_gpu(20, 95.0)],
+            drives: vec![DriveTemp {
+                name: "Samsung SSD 980 PRO".into(),
+                celsius: 74.0,
+                limit: Some(70.0),
+            }],
+            ..Stats::default()
+        });
+        assert_eq!(summary.warnings.len(), 2);
+        for kind in RowKind::ALL {
+            assert!(!summary.row_warns(kind), "{kind:?}");
+        }
+        assert!(summary.button_warns(&[RowKind::Gpu, RowKind::Disk]));
+    }
+
+    #[test]
+    fn no_warnings_colour_nothing() {
+        let summary = summary(&Stats {
+            cpu_temp: Some(50.0),
+            mem: Some(memory(40)),
+            ..Stats::default()
+        });
+        assert_eq!(summary.warnings, Vec::new());
+        assert!(!summary.button_warns(&DEFAULT_ROWS));
+        assert!(RowKind::ALL.iter().all(|&kind| !summary.row_warns(kind)));
+    }
+
+    #[test]
+    fn hand_written_limits_are_clamped_to_the_settings_page_ranges() {
+        let wild = PanelSettings {
+            warn_temp: 200,
+            warn_usage: 10,
+            ..PanelSettings::default()
+        };
+        let clamped = wild.clamped();
+        assert_eq!((clamped.warn_temp, clamped.warn_usage), (110, 50));
+        assert_eq!(PanelSettings::default().clamped(), PanelSettings::default());
     }
 
     #[test]

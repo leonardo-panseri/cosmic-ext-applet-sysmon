@@ -4,7 +4,7 @@
 //! ordinary window, fed with fixed, made-up [`Stats`] ([`fixture`]): two GPUs (a suspended
 //! NVIDIA card and an AMD iGPU), two network interfaces, three filesystems, two `NVMe` drives and
 //! full histories. Nothing is read from the system, so no GPU is woken. The **Settings** button
-//! switches pages; **Process monitor** only prints.
+//! switches pages; settings apply to the preview only; **Process monitor** only prints.
 //!
 //! `SYSMON_PREVIEW_SCREENSHOT=<file>` instead draws a mock top panel over a backdrop, in COSMIC's
 //! default dark theme, saves the window's pixels to `<file>` and exits. `SYSMON_PREVIEW_HEIGHT`
@@ -30,6 +30,7 @@ use crate::sources::loadavg::LoadAvg;
 use crate::sources::meminfo::MemInfo;
 use crate::ui::panel_button::panel_button;
 use crate::ui::popup::{self, Page};
+use crate::ui::settings::SettingsModels;
 use sysmon_proto::{Mount, Process, TopProcesses};
 
 /// As wide as the panel's popup at most.
@@ -70,6 +71,7 @@ struct Preview {
     shot: Option<String>,
     stats: Stats,
     settings: PanelSettings,
+    models: SettingsModels,
     summary: PanelSummary,
     page: Page,
     /// The stats page grows instead of scrolling.
@@ -109,6 +111,7 @@ impl cosmic::Application for Preview {
             core,
             shot,
             stats,
+            models: SettingsModels::new(&settings),
             settings,
             summary,
             page: if std::env::var_os("SYSMON_PREVIEW_SETTINGS").is_some() {
@@ -125,6 +128,12 @@ impl cosmic::Application for Preview {
         match message {
             Message::ShowPage(page) => self.page = page,
             Message::OpenProcessMonitor => eprintln!("preview: would open the process monitor"),
+            // Applied here only: the preview stores nothing.
+            Message::Setting(change) => {
+                self.settings = self.models.changed(change, &self.settings);
+                self.models.select(&self.settings);
+                self.summary = PanelSummary::new(&self.stats, &self.settings);
+            }
             _ => {}
         }
         Task::none()
@@ -143,6 +152,7 @@ impl cosmic::Application for Preview {
             card(popup::view(
                 Some(&self.stats),
                 &self.settings,
+                &self.models,
                 self.page,
                 popup::PAGE_MAX_HEIGHT,
             ))

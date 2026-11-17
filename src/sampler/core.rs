@@ -15,12 +15,14 @@ pub const INTERVAL: Duration = Duration::from_secs(2);
 pub const BATTERY_CLOSED_INTERVAL: Duration = Duration::from_secs(4);
 
 /// What the UI tells the sampler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Control {
     /// The popup opened (open tier) or closed (closed tier).
     PopupOpen(bool),
     /// The machine went on battery or back on AC (`UPower` `OnBattery`).
     OnBattery(bool),
+    /// The panel button's settings changed (§2.3).
+    Settings(PanelSettings),
 }
 
 /// What the sampler tells the UI.
@@ -94,7 +96,8 @@ impl Core {
     }
 
     /// Applies `control`. Opening the popup returns the last update right away, so the popup has
-    /// the history without waiting for a tick.
+    /// the history without waiting for a tick. New settings return the last sample's update
+    /// redone under them, if that changes what the panel button shows, so it redraws at once.
     pub fn control(&mut self, control: Control) -> Option<Update> {
         match control {
             Control::PopupOpen(open) => {
@@ -106,6 +109,16 @@ impl Core {
             Control::OnBattery(on_battery) => {
                 self.on_battery = on_battery;
                 None
+            }
+            Control::Settings(settings) => {
+                self.settings = settings;
+                let (at, last) = self.last.take()?;
+                let update = Update {
+                    panel: PanelSummary::new(&last.stats, &self.settings),
+                    stats: last.stats,
+                };
+                self.last = Some((at, update.clone()));
+                (self.sent.as_ref() != Some(&update.panel)).then(|| self.send(update))
             }
         }
     }
@@ -119,6 +132,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panel::{Layout, RowKind};
     use crate::sources::meminfo::MemInfo;
 
     fn memory(percent: u64) -> Sample {
@@ -182,6 +196,82 @@ mod tests {
         core.sample(memory(50), t0 + INTERVAL);
         core.control(Control::PopupOpen(false));
         assert!(core.sample(memory(50), t0 + 2 * INTERVAL).is_none());
+    }
+
+    #[test]
+    fn new_settings_redo_the_last_sample_at_once() {
+        let mut core = Core::new(PanelSettings::default());
+        // Nothing sampled yet: nothing to send.
+        assert!(
+            core.control(Control::Settings(PanelSettings::default()))
+                .is_none()
+        );
+        let t0 = Instant::now();
+        let mut sample = memory(45);
+        sample.cpu_temp = Some(88.0);
+        core.sample(sample, t0);
+
+        let shows_temp = PanelSettings {
+            bottom: RowKind::CpuTemp,
+            ..PanelSettings::default()
+        };
+        let update = core.control(Control::Settings(shows_temp.clone())).unwrap();
+        assert_eq!(update.panel.bottom.as_deref(), Some("88°C"));
+        // The hot CPU moved onto the bar: its row warns, not the whole button.
+        let shown = shows_temp.shown_rows(shows_temp.layout);
+        assert!(update.panel.row_warns(RowKind::CpuTemp));
+        assert!(!update.panel.button_warns(&shown));
+        // The same settings again change nothing.
+        assert!(core.control(Control::Settings(shows_temp)).is_none());
+        // Later samples follow the new settings.
+        let mut sample = memory(45);
+        sample.cpu_temp = Some(89.0);
+        let update = core.sample(sample, t0 + INTERVAL).unwrap();
+        assert_eq!(update.panel.bottom.as_deref(), Some("89°C"));
+
+        // Back to memory: the hot CPU is off the bar again, so the whole button warns.
+        let defaults = PanelSettings::default();
+        let update = core.control(Control::Settings(defaults.clone())).unwrap();
+        assert_eq!(update.panel.bottom.as_deref(), Some("45%"));
+        assert!(
+            update
+                .panel
+                .button_warns(&defaults.shown_rows(defaults.layout))
+        );
+    }
+
+    #[test]
+    fn a_new_limit_raises_or_clears_a_warning_at_once() {
+        let mut core = Core::new(PanelSettings::default());
+        core.sample(memory(80), Instant::now());
+        let strict = PanelSettings {
+            warn_usage: 75,
+            ..PanelSettings::default()
+        };
+        let update = core.control(Control::Settings(strict)).unwrap();
+        assert!(update.panel.row_warns(RowKind::Memory));
+        let update = core
+            .control(Control::Settings(PanelSettings::default()))
+            .unwrap();
+        assert_eq!(update.panel.warnings, Vec::new());
+    }
+
+    #[test]
+    fn a_layout_change_alone_sends_nothing() {
+        // The UI lays out the same summary; only the top and bottom values are in it.
+        let mut core = Core::new(PanelSettings::default());
+        core.sample(memory(45), Instant::now());
+        let one_line = PanelSettings {
+            layout: Layout::OneLine,
+            ..PanelSettings::default()
+        };
+        assert!(core.control(Control::Settings(one_line.clone())).is_none());
+        let hidden_rates = PanelSettings {
+            network: false,
+            ..one_line
+        };
+        // The rates were already `None` without a second sample, so nothing changes either.
+        assert!(core.control(Control::Settings(hidden_rates)).is_none());
     }
 
     #[test]

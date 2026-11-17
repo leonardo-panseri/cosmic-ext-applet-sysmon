@@ -54,5 +54,30 @@ no-processes = Not available
 
 process-monitor = Process monitor
 settings = Settings
-settings-placeholder = Settings arrive in a later version.
 back = Back
+# Section headers, shown as written.
+setting-layout = LAYOUT
+setting-top-row = TOP ROW
+setting-bottom-row = BOTTOM ROW
+setting-warn = WARN AT OR ABOVE
+layout-stacked = Stacked
+layout-one-line = One line
+layout-compact = Compact
+# The CPU temperature, as a choice for a panel row.
+row-cpu-temp = CPU °C
+setting-network = Network speed
+setting-network-description = Download and upload
+setting-warn-temp = Temperature
+setting-warn-temp-description = CPU or GPU, in °C
+setting-warn-usage = Memory or disk
+setting-warn-usage-description = Percent full
+
+## Panel button: the tooltip, one line per warning
+
+warning-cpu-temp = CPU at { $celsius }°C, limit { $limit }°C
+# $gpu is the model, or "GPU card1" (gpu-unnamed).
+warning-gpu-temp = { $gpu } at { $celsius }°C, limit { $limit }°C
+warning-memory = Memory { $percent }% full, limit { $limit }%
+warning-filesystem = { $mount } { $percent }% full, limit { $limit }%
+# An NVMe drive, against the limit its maker rates it for.
+warning-nvme = { $drive } at { $celsius }°C, its limit { $limit }°C
