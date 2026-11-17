@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=System Monitor
+Comment=CPU, memory, GPU, disk and network at a glance in the COSMIC™ panel
+Type=Application
+Icon=io.github.leonardo_panseri.cosmic-ext-applet-sysmon
+Exec=cosmic-ext-applet-sysmon
+Terminal=false
+StartupNotify=true
+Categories=COSMIC
+Keywords=COSMIC;System;Monitor;CPU;Memory;GPU;Network;
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
+X-OverflowPriority=10
