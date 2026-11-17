@@ -49,6 +49,19 @@ pub fn rate(bytes_per_sec: f64) -> String {
     "999P".into()
 }
 
+/// A size in bytes, as [`rate`] writes it but without a trailing `.0`: `"0B"`, `"2.4G"`, `"8G"`,
+/// `"212G"`.
+#[must_use]
+pub fn size(bytes: u64) -> String {
+    // Sizes shown here are far below 2^52 bytes, so the cast is exact.
+    #[expect(clippy::cast_precision_loss, reason = "see above")]
+    let text = rate(bytes as f64);
+    match text.split_once(".0") {
+        Some((whole, unit)) if unit.chars().all(char::is_alphabetic) => format!("{whole}{unit}"),
+        _ => text,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +128,14 @@ mod tests {
     fn rate_shows_nonsense_as_zero() {
         assert_eq!(rate(-5.0), "0B");
         assert_eq!(rate(f64::NAN), "0B");
+    }
+
+    #[test]
+    fn size_drops_a_trailing_zero_decimal() {
+        assert_eq!(size(0), "0B");
+        assert_eq!(size(8 << 30), "8G");
+        assert_eq!(size(2_576_980_378), "2.4G");
+        assert_eq!(size(212 << 30), "212G");
+        assert_eq!(size(1 << 40), "1T");
     }
 }

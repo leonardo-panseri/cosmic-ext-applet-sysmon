@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Regenerate the screenshots the metainfo points at.
 
-A stub until P6 (docs/implementation-plan.md §5). The plan is the same as in
-cosmic-ext-applet-codexbar: a debug-only preview mode in the applet draws a mock
-panel and the popup from made-up values, saves its own window's pixels as raw
-RGBA and exits, and this script turns them into resources/screenshots/<name>.png.
+Builds the applet in debug mode and runs its preview (src/preview.rs) once per
+screenshot below. The preview draws a mock top panel and the popup over a
+backdrop in COSMIC's default dark theme, from fixed made-up stats (nothing is
+read from the system, so no GPU is woken), saves its own window's pixels and
+exits; this script writes them out as a PNG.
 
 Needs cargo, a running Wayland session and Python 3.11+ (stdlib only). Usage:
 
@@ -13,19 +14,91 @@ Needs cargo, a running Wayland session and Python 3.11+ (stdlib only). Usage:
 """
 
 import argparse
+import os
+import struct
+import subprocess
 import sys
+import tempfile
+import zlib
+from pathlib import Path
 
-# name -> the preview's environment. Filled in once the preview exists.
-SHOTS: dict[str, dict[str, str]] = {}
+ROOT = Path(__file__).resolve().parent.parent
+BINARY = ROOT / "target" / "debug" / "cosmic-ext-applet-sysmon"
+OUT_DIR = ROOT / "resources" / "screenshots"
+# The preview waits 1.5 s before its screenshot; this is the limit for the whole run.
+TIMEOUT = 60
+# libcosmic outlines the window, even with its decorations off; this many pixels are cut off
+# each side.
+BORDER = 1
+
+# name -> the preview's environment. SYSMON_PREVIEW_HEIGHT fits the window to the popup.
+SHOTS = {
+    # The popup as the panel shows it: the stats page scrolls above the footer.
+    "popup": {"SYSMON_PREVIEW_HEIGHT": "860"},
+    # The whole stats page at once, cut in two halves side by side.
+    "popup-full": {"SYSMON_PREVIEW_FULL": "1", "SYSMON_PREVIEW_HEIGHT": "860"},
+}
+
+
+def capture(env: dict[str, str]) -> tuple[int, int, bytes]:
+    """Runs the preview and returns the width, height and RGBA pixels it saved."""
+    with tempfile.TemporaryDirectory() as tmp:
+        raw = Path(tmp) / "shot.rgba"
+        run_env = {**os.environ, "SYSMON_PREVIEW": "1", **env,
+                   "SYSMON_PREVIEW_SCREENSHOT": str(raw)}
+        subprocess.run([BINARY], cwd=ROOT, env=run_env, check=True, timeout=TIMEOUT)
+        data = raw.read_bytes()
+    if data[:4] != b"RGBA":
+        raise ValueError("the preview didn't save a screenshot")
+    width, height = struct.unpack("<II", data[4:12])
+    pixels = data[12:]
+    if len(pixels) != width * height * 4:
+        raise ValueError(f"expected {width}x{height} pixels, got {len(pixels)} bytes")
+    return width, height, pixels
+
+
+def crop(width: int, height: int, rgba: bytes, margin: int) -> tuple[int, int, bytes]:
+    """Cuts `margin` pixels off each side."""
+    stride = width * 4
+    rows = (rgba[y * stride + margin * 4:(y + 1) * stride - margin * 4]
+            for y in range(margin, height - margin))
+    return width - 2 * margin, height - 2 * margin, b"".join(rows)
+
+
+def png(width: int, height: int, rgba: bytes) -> bytes:
+    """An 8-bit RGBA PNG, every row unfiltered."""
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        crc = zlib.crc32(kind + body)
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", crc)
+
+    stride = width * 4
+    rows = b"".join(b"\0" + rgba[y * stride:(y + 1) * stride] for y in range(height))
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b""))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("names", nargs="*", metavar="name",
-                        help="screenshots to take (default: all)")
-    parser.parse_args()
-    print("no screenshots yet: the preview mode arrives in P6", file=sys.stderr)
-    return 1
+                        help=f"screenshots to take: {', '.join(SHOTS)} (default: all)")
+    names = parser.parse_args().names or list(SHOTS)
+    unknown = [name for name in names if name not in SHOTS]
+    if unknown:
+        parser.error(f"unknown screenshot {', '.join(unknown)}; choose from {', '.join(SHOTS)}")
+
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        print("needs a Wayland session to open the preview window", file=sys.stderr)
+        return 2
+    # The preview is compiled into debug builds only.
+    subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        width, height, pixels = crop(*capture(SHOTS[name]), BORDER)
+        out = OUT_DIR / f"{name}.png"
+        out.write_bytes(png(width, height, pixels))
+        print(f"wrote {out.relative_to(ROOT)} ({width}x{height})")
+    return 0
 
 
 if __name__ == "__main__":

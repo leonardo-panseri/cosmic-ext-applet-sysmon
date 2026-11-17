@@ -89,6 +89,25 @@ pub struct Histories {
     /// Network download and upload, bytes/s, all physical interfaces together.
     pub net_down: History,
     pub net_up: History,
+    /// Each physical interface's download and upload, in [`Stats::net`] order.
+    pub interfaces: Vec<InterfaceHistory>,
+}
+
+/// One network interface's history, bytes/s.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InterfaceHistory {
+    pub name: String,
+    pub down: History,
+    pub up: History,
+}
+
+impl InterfaceHistory {
+    /// Whether anything went through it in the last two minutes: the popup's sign that it is in
+    /// use, since an interface that is down moves nothing.
+    #[must_use]
+    pub fn had_traffic(&self) -> bool {
+        self.down.iter().chain(self.up.iter()).any(|v| v > 0.0)
+    }
 }
 
 /// What one tick measured, ready to show.
@@ -104,8 +123,7 @@ pub struct Stats {
     pub net: Vec<DeviceRate>,
     /// All of [`Self::net`] together: `first` is download, `second` upload.
     pub net_total: Option<PairRate>,
-    pub disks: Vec<DeviceRate>,
-    /// All of [`Self::disks`] together: `first` is read, `second` written.
+    /// All physical disks together, bytes/s: `first` is read, `second` written.
     pub disk_total: Option<PairRate>,
     pub cpu_temp: Option<f32>,
     pub drives: Vec<DriveTemp>,
@@ -189,12 +207,13 @@ impl Tracker {
             self.history.cpu.push(cpu);
         }
         if elapsed.is_some() {
-            let net = net_total.unwrap_or_default();
+            let total = net_total.unwrap_or_default();
             #[expect(clippy::cast_possible_truncation, reason = "graph values")]
             {
-                self.history.net_down.push(net.first as f32);
-                self.history.net_up.push(net.second as f32);
+                self.history.net_down.push(total.first as f32);
+                self.history.net_up.push(total.second as f32);
             }
+            self.push_interface_history(&net);
         }
         self.push_gpu_history(&sample.gpus);
 
@@ -206,7 +225,6 @@ impl Tracker {
             uptime: sample.uptime,
             net,
             net_total,
-            disks,
             disk_total,
             cpu_temp: sample.cpu_temp,
             drives: sample.drives,
@@ -215,6 +233,31 @@ impl Tracker {
             processes: sample.processes,
             history: self.history.clone(),
         }
+    }
+
+    fn push_interface_history(&mut self, net: &[DeviceRate]) {
+        let mut old: HashMap<_, _> = std::mem::take(&mut self.history.interfaces)
+            .into_iter()
+            .map(|h| (h.name.clone(), h))
+            .collect();
+        self.history.interfaces = net
+            .iter()
+            .map(|device| {
+                let mut history = old
+                    .remove(&device.name)
+                    .unwrap_or_else(|| InterfaceHistory {
+                        name: device.name.clone(),
+                        ..InterfaceHistory::default()
+                    });
+                let rate = device.rate.unwrap_or_default();
+                #[expect(clippy::cast_possible_truncation, reason = "graph values")]
+                {
+                    history.down.push(rate.first as f32);
+                    history.up.push(rate.second as f32);
+                }
+                history
+            })
+            .collect();
     }
 
     fn push_gpu_history(&mut self, gpus: &[GpuSample]) {
@@ -358,6 +401,46 @@ mod tests {
         assert_eq!((total.first, total.second), (2000.0, 200.0));
         assert_eq!(stats.history.net_down.latest(), Some(2000.0));
         assert_eq!(stats.history.net_up.latest(), Some(200.0));
+        let interfaces: Vec<_> = stats
+            .history
+            .interfaces
+            .iter()
+            .map(|h| (h.name.as_str(), h.down.latest(), h.up.latest()))
+            .collect();
+        assert_eq!(
+            interfaces,
+            [
+                ("eth0", Some(1600.0), Some(160.0)),
+                ("wlan0", Some(400.0), Some(40.0))
+            ]
+        );
+    }
+
+    #[test]
+    fn an_interface_without_traffic_is_seen_as_unused() {
+        let mut tracker = Tracker::default();
+        let t0 = Instant::now();
+        tracker.ingest(
+            Sample {
+                net: vec![iface("eth0", 0, 0), iface("wlan0", 0, 0)],
+                ..Sample::default()
+            },
+            t0,
+        );
+        let stats = tracker.ingest(
+            Sample {
+                net: vec![iface("eth0", 0, 0), iface("wlan0", 500, 0)],
+                ..Sample::default()
+            },
+            t0 + Duration::from_secs(2),
+        );
+        let used: Vec<_> = stats
+            .history
+            .interfaces
+            .iter()
+            .map(|h| (h.name.as_str(), h.had_traffic()))
+            .collect();
+        assert_eq!(used, [("eth0", false), ("wlan0", true)]);
     }
 
     #[test]

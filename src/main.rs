@@ -2,7 +2,10 @@
 
 mod app;
 mod i18n;
+mod launch;
 mod panel;
+#[cfg(debug_assertions)]
+mod preview;
 mod probe_client;
 mod sampler;
 mod sources;
@@ -15,6 +18,11 @@ fn main() -> cosmic::iced::Result {
 
     // Enable localizations to be applied.
     i18n::init(&requested_languages);
+
+    #[cfg(debug_assertions)]
+    if std::env::var_os("SYSMON_PREVIEW").is_some() {
+        return preview::run();
+    }
 
     // Starts the applet's event loop with `()` as the application's flags.
     cosmic::applet::run::<app::AppModel>(())

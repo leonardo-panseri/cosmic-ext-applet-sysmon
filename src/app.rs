@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The applet: the panel button, fed by the sampler thread, and its popup. The popup shows a
-//! placeholder until the stats page comes in P3 (`docs/implementation-plan.md` §5).
+//! The applet: the panel button, fed by the sampler thread, and its popup (plan §2).
 
 use std::sync::Arc;
 
@@ -16,8 +15,8 @@ use crate::panel::{PanelSettings, PanelSummary};
 use crate::sampler::stats::Stats;
 use crate::sampler::{self, Control, SamplerHandle, Update};
 use crate::ui::panel_button::panel_button;
-use crate::ui::popup::interim_stats;
-use crate::upower;
+use crate::ui::popup::{self, Page};
+use crate::{launch, upower};
 
 /// The applet's state.
 pub struct AppModel {
@@ -25,6 +24,8 @@ pub struct AppModel {
     core: cosmic::Core,
     /// The popup's window, while it is open.
     popup: Option<Id>,
+    /// The popup's page.
+    page: Page,
     /// The panel button's settings; loaded from cosmic-config in P5.
     settings: PanelSettings,
     /// The sampler's control channel, once it has started.
@@ -39,8 +40,10 @@ pub struct AppModel {
 pub enum Message {
     /// A left click on the panel button.
     TogglePopup,
-    /// A right click on the panel button.
+    /// A right click on the panel button, or the popup's **Process monitor** button.
     OpenProcessMonitor,
+    /// One of the popup's buttons switched pages.
+    ShowPage(Page),
     /// The compositor closed the popup, for example after a click outside it.
     PopupClosed(Id),
     /// The sampler thread started.
@@ -81,6 +84,7 @@ impl cosmic::Application for AppModel {
         let app = AppModel {
             core,
             popup: None,
+            page: Page::Stats,
             settings: PanelSettings::default(),
             sampler: None,
             panel: None,
@@ -108,7 +112,12 @@ impl cosmic::Application for AppModel {
     }
 
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
-        let content = widget::container(interim_stats(self.stats.as_deref())).padding(16);
+        let content = popup::view(
+            self.stats.as_deref(),
+            &self.settings,
+            self.page,
+            popup::PAGE_MAX_HEIGHT,
+        );
         self.core.applet.popup_container(content).into()
     }
 
@@ -124,6 +133,7 @@ impl cosmic::Application for AppModel {
                 };
                 let new_id = Id::unique();
                 self.popup = Some(new_id);
+                self.page = Page::Stats;
                 self.popup_changed();
                 let mut popup_settings = self
                     .core
@@ -136,8 +146,14 @@ impl cosmic::Application for AppModel {
                     .max_height(1080.0);
                 return get_popup(popup_settings);
             }
-            // The launch through `flatpak-spawn --host` comes with the popup's button (plan D5).
-            Message::OpenProcessMonitor => eprintln!("would open the process monitor"),
+            Message::OpenProcessMonitor => {
+                launch::process_monitor();
+                if let Some(id) = self.popup.take() {
+                    self.popup_changed();
+                    return destroy_popup(id);
+                }
+            }
+            Message::ShowPage(page) => self.page = page,
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;

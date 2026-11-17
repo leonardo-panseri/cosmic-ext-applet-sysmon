@@ -28,6 +28,7 @@ impl History {
     }
 
     /// The newest value.
+    #[cfg(test)]
     #[must_use]
     pub fn latest(&self) -> Option<f32> {
         self.values.back().copied()

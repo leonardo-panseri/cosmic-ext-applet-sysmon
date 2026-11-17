@@ -66,7 +66,7 @@ install:
 uninstall:
     rm {{bin-dst}} {{desktop-dst}} {{icon-dst}}
 
-# Regenerates resources/screenshots/ (a stub until P6; needs a Wayland session)
+# Regenerates resources/screenshots/ from the preview's made-up stats (needs a Wayland session)
 screenshots *names:
     python3 tools/screenshots.py {{names}}
 
