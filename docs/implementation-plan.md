@@ -211,8 +211,10 @@ File handles stay open and are reread with `pread` at offset 0, so there is no `
   unsandboxed process, so its whole interface is read-only by construction.
 - **Processes:** reads `/proc/<pid>/stat` and `statm` and computes CPU % from the difference against its previous
   scan. Only runs when asked, which is only while the popup is open.
-- **Build:** `x86_64-unknown-linux-musl` (and aarch64), statically linked, because it runs against the host's libc,
-  not the Flatpak runtime's (spike S2).
+- **Build:** an ordinary dynamically linked `x86_64-unknown-linux-gnu` (and aarch64) binary from the SDK. It
+  runs with the host's loader and glibc, needs glibc ≥ 2.34 on the host (checked at build time), and can
+  `dlopen` the host's `libnvidia-ml`. If it can't start, the applet uses sandbox-only data
+  ([ADR 0002](adr/0002-dynamic-glibc-probe.md), spike S2).
 - **Non-Flatpak** (development, distro packages): the same `Probe` trait has an in-process backend, so
   `cargo run` needs no helper.
 
@@ -245,8 +247,13 @@ No `--device=all` and no `--filesystem=/sys/...`: the default `/sys` exposure wa
 - **S2 — static probe in flatpak-builder** (before P2). Is the musl target available in
   `org.freedesktop.Sdk.Extension.rust-stable`? If not, find the least bad alternative (e.g. build against an old glibc
   baseline).
+  **Result:** no musl target, and static musl can't `dlopen` libnvidia-ml anyway. Dynamic glibc
+  ([ADR 0002](adr/0002-dynamic-glibc-probe.md)).
 - **S3 — `app-path` for user and system installs** (before P2). Check that the host can run the probe for
   `--user` and `--system` installs, and from `flatpak-builder --run` during development.
+  **Result:** works for `--user` (`app-path` is the commit's own `files` dir, stable for the instance);
+  `--system` checkouts are world-readable by the same evidence; `--watch-bus` does kill the host process.
+  `flatpak-spawn` fails under `flatpak-builder --run`, so develop against an installed build (ADR 0002).
 - **S4 — Panel right click and fixed width** (before P1 is done). Check that libcosmic's applet button can
   handle a right-click and a fixed-width label without breaking the panel's padding rules.
 

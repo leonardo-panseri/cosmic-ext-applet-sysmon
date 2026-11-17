@@ -25,7 +25,8 @@ wakeups, so there is no reason to restart it.
 ## Consequences
 
 - The probe runs unsandboxed, so its interface accepts no paths, commands or arguments from the applet.
-- The probe is a separate, statically linked binary, since it runs against the host's libc, not the runtime's.
+- The probe is a separate binary that runs against the host's libc, not the runtime's. It is dynamically
+  linked so it can load the host's libnvidia-ml ([ADR 0002](0002-dynamic-glibc-probe.md)).
 - The applet and probe check a protocol version on start, so a probe from another installation is caught.
 - Outside a Flatpak (`cargo run`, distro packages) the same interface has an in-process backend, so no helper
   is needed there.
