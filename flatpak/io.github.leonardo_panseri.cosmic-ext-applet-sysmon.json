@@ -29,8 +29,10 @@
       "buildsystem": "simple",
       "build-commands": [
         "cargo --offline fetch --manifest-path Cargo.toml --verbose",
-        "cargo --offline build --release --locked --verbose",
+        "cargo --offline build --release --locked --workspace --verbose",
+        "sh ./tools/check-glibc.sh ./target/release/sysmon-probe 2.34",
         "install -Dm0755 ./target/release/cosmic-ext-applet-sysmon /app/bin/cosmic-ext-applet-sysmon",
+        "install -Dm0755 ./target/release/sysmon-probe /app/bin/sysmon-probe",
         "install -Dm0644 ./target/xdgen/app.desktop /app/share/applications/io.github.leonardo_panseri.cosmic-ext-applet-sysmon.desktop",
         "install -Dm0644 ./target/xdgen/app.metainfo.xml /app/share/metainfo/io.github.leonardo_panseri.cosmic-ext-applet-sysmon.metainfo.xml",
         "install -Dm0644 ./resources/icon.svg /app/share/icons/hicolor/scalable/apps/io.github.leonardo_panseri.cosmic-ext-applet-sysmon.svg"

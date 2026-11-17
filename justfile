@@ -39,9 +39,14 @@ build-release *args: (build-debug '--release' args)
 # Compiles release profile with vendored dependencies
 build-vendored *args: vendor-extract (build-release '--frozen --offline' args)
 
-# Runs a clippy check
+# Runs a clippy check over the whole workspace (applet, probe and protocol)
 check *args:
-    cargo clippy --all-features {{args}} -- -W clippy::pedantic
+    cargo clippy --workspace --all-features {{args}} -- -W clippy::pedantic
+
+# Fails if the probe needs a GLIBC_ symbol version newer than 2.34, the host floor of ADR 0002
+# (the Flatpak manifest runs the same check on the binary it installs)
+check-glibc: (build-release '-p sysmon-probe')
+    sh tools/check-glibc.sh {{ cargo-target-dir / 'release' / 'sysmon-probe' }} 2.34
 
 # Runs a clippy check with JSON message format
 check-json: (check '--message-format=json')

@@ -189,7 +189,7 @@ network on, 85 °C, 90 %.
 ```
 crates/
   sysmon-proto/   # serde types for probe requests/replies, protocol version
-  sysmon-probe/   # host helper: static musl binary, no libcosmic
+  sysmon-probe/   # host helper: dynamic glibc binary (ADR 0002), no libcosmic; lib reused in-process
 src/              # the applet
   sampler/        # thread, tiers, rates, ring buffer
   sources/        # pure parsers: proc_stat, meminfo, net_dev, diskstats, hwmon, drm, nvidia_procfs

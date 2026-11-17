@@ -13,6 +13,7 @@ use crate::sources::loadavg::LoadAvg;
 use crate::sources::meminfo::MemInfo;
 use crate::sources::net_dev::InterfaceCounters;
 use crate::sources::proc_stat::{self, ProcStat};
+use sysmon_proto::{Mount, TopProcesses};
 
 /// One tick's raw numbers, as read. Anything that couldn't be read is `None` or missing.
 #[derive(Debug, Clone, Default)]
@@ -29,7 +30,10 @@ pub struct Sample {
     pub cpu_temp: Option<f32>,
     pub drives: Vec<DriveTemp>,
     pub gpus: Vec<GpuSample>,
-    pub root_fs: Option<FsUsage>,
+    /// The host's real mounts, from the probe (D2: every 30 s); empty without a probe.
+    pub mounts: Vec<Mount>,
+    /// The top processes, from the probe; only in the open tier.
+    pub processes: Option<TopProcesses>,
 }
 
 /// An `nvme` drive's temperature.
@@ -56,21 +60,6 @@ pub struct GpuSample {
     pub vram_used: Option<u64>,
     pub vram_total: Option<u64>,
     pub celsius: Option<f32>,
-}
-
-/// Space on a filesystem, in bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FsUsage {
-    pub used: u64,
-    pub total: u64,
-}
-
-impl FsUsage {
-    /// Space used, in percent of the total.
-    #[must_use]
-    pub fn percent(&self) -> Option<f32> {
-        share(self.used, self.total)
-    }
 }
 
 /// `part` as a percentage of `whole`.
@@ -121,7 +110,10 @@ pub struct Stats {
     pub cpu_temp: Option<f32>,
     pub drives: Vec<DriveTemp>,
     pub gpus: Vec<GpuSample>,
-    pub root_fs: Option<FsUsage>,
+    /// Real mounts, `/` first when it is one (D7).
+    pub mounts: Vec<Mount>,
+    /// `None` in the closed tier, or without a probe.
+    pub processes: Option<TopProcesses>,
     pub history: Histories,
 }
 
@@ -130,6 +122,15 @@ impl Stats {
     #[must_use]
     pub fn memory_percent(&self) -> Option<f32> {
         self.mem.and_then(|m| share(m.mem_used(), m.mem_total))
+    }
+
+    /// The root filesystem's used space, %: what the panel's Disk row shows.
+    #[must_use]
+    pub fn root_fs_percent(&self) -> Option<f32> {
+        self.mounts
+            .iter()
+            .find(|m| m.mount_point == "/")
+            .and_then(Mount::used_percent)
     }
 
     /// The first GPU that may be queried and reports a load: the one `gpu` on the panel shows.
@@ -210,7 +211,8 @@ impl Tracker {
             cpu_temp: sample.cpu_temp,
             drives: sample.drives,
             gpus: sample.gpus,
-            root_fs: sample.root_fs,
+            mounts: sample.mounts,
+            processes: sample.processes,
             history: self.history.clone(),
         }
     }

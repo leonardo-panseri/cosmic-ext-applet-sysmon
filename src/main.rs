@@ -3,6 +3,7 @@
 mod app;
 mod i18n;
 mod panel;
+mod probe_client;
 mod sampler;
 mod sources;
 mod ui;

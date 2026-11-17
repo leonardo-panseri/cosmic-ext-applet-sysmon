@@ -955,7 +955,8 @@ dependencies = [
  "i18n-embed-fl",
  "libcosmic",
  "rust-embed",
- "rustix 1.1.6",
+ "sysmon-probe",
+ "sysmon-proto",
  "xdgen",
  "zbus 6.3.0",
 ]
@@ -4862,6 +4863,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "sysmon-probe"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.6",
+ "sysmon-proto",
+]
+
+[[package]]
+name = "sysmon-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

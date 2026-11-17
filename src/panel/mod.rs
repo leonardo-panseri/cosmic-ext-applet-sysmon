@@ -148,9 +148,15 @@ pub fn warnings(stats: &Stats, settings: &PanelSettings) -> Vec<Warning> {
     if stats.memory_percent().is_some_and(full) {
         warnings.push(Warning::Memory);
     }
-    if stats.root_fs.and_then(|fs| fs.percent()).is_some_and(full) {
-        warnings.push(Warning::Filesystem { mount: "/".into() });
-    }
+    warnings.extend(
+        stats
+            .mounts
+            .iter()
+            .filter(|m| m.used_percent().is_some_and(full))
+            .map(|m| Warning::Filesystem {
+                mount: m.mount_point.clone(),
+            }),
+    );
     warnings.extend(
         stats
             .drives
@@ -219,10 +225,7 @@ fn row_value(kind: RowKind, stats: &Stats) -> Option<String> {
             .first_awake_gpu()
             .and_then(|g| g.busy)
             .map(|b| format::percent(f32::from(b))),
-        RowKind::Disk => stats
-            .root_fs
-            .and_then(|fs| fs.percent())
-            .map(format::percent),
+        RowKind::Disk => stats.root_fs_percent().map(format::percent),
         RowKind::CpuTemp => stats.cpu_temp.map(format::celsius),
     }
 }
@@ -231,7 +234,20 @@ fn row_value(kind: RowKind, stats: &Stats) -> Option<String> {
 mod tests {
     use super::*;
     use crate::sampler::rates::PairRate;
-    use crate::sampler::stats::{DriveTemp, FsUsage, GpuSample};
+    use crate::sampler::stats::{DriveTemp, GpuSample};
+    use sysmon_proto::Mount;
+
+    /// A filesystem at `mount_point`, `used` % full (no reserved blocks).
+    fn mount(mount_point: &str, used: u64) -> Mount {
+        Mount {
+            mount_point: mount_point.into(),
+            device: "/dev/sda1".into(),
+            fs_type: "ext4".into(),
+            total: 100,
+            used,
+            available: 100 - used,
+        }
+    }
     use crate::sources::drm::RuntimeStatus;
     use crate::sources::meminfo::MemInfo;
 
@@ -293,7 +309,7 @@ mod tests {
     fn every_row_kind_shows_its_value() {
         let stats = Stats {
             gpus: vec![amd_gpu(37, 50.0)],
-            root_fs: Some(FsUsage { used: 3, total: 4 }),
+            mounts: vec![mount("/boot", 10), mount("/", 75)],
             cpu_temp: Some(61.6),
             ..Stats::default()
         };
@@ -318,10 +334,7 @@ mod tests {
             cpu_temp: Some(85.0),
             gpus: vec![amd_gpu(10, 84.9)],
             mem: Some(memory(90)),
-            root_fs: Some(FsUsage {
-                used: 89,
-                total: 100,
-            }),
+            mounts: vec![mount("/", 89), mount("/mnt/storage", 90)],
             drives: vec![
                 DriveTemp {
                     name: "Fast SSD".into(),
@@ -341,6 +354,9 @@ mod tests {
             [
                 Warning::CpuTemp,
                 Warning::Memory,
+                Warning::Filesystem {
+                    mount: "/mnt/storage".into()
+                },
                 Warning::Nvme {
                     drive: "Fast SSD".into()
                 },

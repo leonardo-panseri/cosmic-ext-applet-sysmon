@@ -81,10 +81,17 @@ pub fn interim_stats<'a>(stats: Option<&Stats>) -> Element<'a, Message> {
             .iter()
             .map(|d| format!("  {} {}", d.name, rates(d.rate))),
     );
-    lines.push(format!(
-        "/ {}",
-        pct(stats.root_fs.and_then(|fs| fs.percent()))
-    ));
+    lines.extend(stats.mounts.iter().map(|m| {
+        format!(
+            "{} {} {} · {} / {} · {}",
+            m.mount_point,
+            m.device,
+            m.fs_type,
+            gib(m.used),
+            gib(m.total),
+            pct(m.used_percent())
+        )
+    }));
     lines.extend(stats.drives.iter().map(|d| {
         format!(
             "{} {} (limit {})",
@@ -109,6 +116,20 @@ pub fn interim_stats<'a>(stats: Option<&Stats>) -> Element<'a, Message> {
             deg(g.celsius)
         )
     }));
+    if let Some(top) = &stats.processes {
+        lines.push("Top CPU".into());
+        lines.extend(
+            top.by_cpu
+                .iter()
+                .map(|p| format!("  {} {} {:.1}%", p.pid, p.name, p.cpu)),
+        );
+        lines.push("Top memory".into());
+        lines.extend(
+            top.by_memory
+                .iter()
+                .map(|p| format!("  {} {} {}", p.pid, p.name, gib(p.rss))),
+        );
+    }
     let history = &stats.history;
     lines.push(format!(
         "History: CPU {}, net {}, GPUs {} (latest CPU {})",

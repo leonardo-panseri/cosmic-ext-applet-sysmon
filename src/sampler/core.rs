@@ -67,6 +67,12 @@ impl Core {
         }
     }
 
+    /// Whether the popup is open: the open tier.
+    #[must_use]
+    pub fn popup_open(&self) -> bool {
+        self.popup_open
+    }
+
     /// When the next sample is due: one interval after the last, or right away.
     #[must_use]
     pub fn deadline(&self, now: Instant) -> Instant {

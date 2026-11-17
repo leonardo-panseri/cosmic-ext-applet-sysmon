@@ -1,0 +1,12 @@
+[package]
+name = "sysmon-probe"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+description = "Host-side helper of the sysmon applet: process table and mounts, read-only"
+publish = false
+
+[dependencies]
+sysmon-proto = { path = "../sysmon-proto" }
+# Raw syscalls, no libc symbols: `statvfs` and the page size.
+rustix = { version = "1.1", default-features = false, features = ["std", "fs", "param"] }

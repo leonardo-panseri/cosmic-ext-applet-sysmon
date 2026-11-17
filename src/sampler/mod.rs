@@ -6,6 +6,9 @@
 //! and receives [`Update`]s. The thread sleeps in `recv_timeout` on its control channel, so it
 //! wakes exactly once per tick, or when told something, and a control message takes effect at
 //! once. It stops when either side of the channels is dropped.
+//!
+//! The probe ([`probe_client`]) is called from this thread too, so its blocking calls never
+//! reach the UI.
 
 pub mod core;
 pub mod history;
@@ -22,6 +25,7 @@ use self::core::Core;
 pub use self::core::{Control, Update};
 use self::readers::Readers;
 use crate::panel::PanelSettings;
+use crate::probe_client;
 
 /// The UI's end of the control channel.
 #[derive(Debug, Clone)]
@@ -54,12 +58,13 @@ fn run(
     control: &mpsc::Receiver<Control>,
     updates: &async_mpsc::UnboundedSender<Update>,
 ) {
-    let mut readers = Readers::new();
+    let mut readers = Readers::new(probe_client::connect());
+    readers.debug_probe();
     loop {
         let now = Instant::now();
         let deadline = core.deadline(now);
         let update = if deadline <= now {
-            core.sample(readers.read(now), now)
+            core.sample(readers.read(now, core.popup_open()), now)
         } else {
             match control.recv_timeout(deadline - now) {
                 Ok(message) => core.control(message),

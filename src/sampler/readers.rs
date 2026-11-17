@@ -8,6 +8,10 @@
 //! [may be queried](RuntimeStatus::may_query). Its driver, its files and any hwmon chip under its
 //! device are looked at only then, and the chip and files only on ticks where it still may be.
 //! Nothing here opens `/dev`.
+//!
+//! What the sandbox can't see comes from the [`Probe`]: the host's mounts every [`MOUNTS_EVERY`]
+//! in both tiers, the top processes on every open-tier tick (D2). Those calls block this thread
+//! for at most the probe's timeouts.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -16,7 +20,10 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::stats::{DriveTemp, FsUsage, GpuSample, Sample};
+use sysmon_proto::Mount;
+
+use super::stats::{DriveTemp, GpuSample, Sample};
+use crate::probe_client::Probe;
 use crate::sources::drm::{self, RuntimeStatus};
 use crate::sources::hwmon::{self, ChipTemp};
 use crate::sources::{
@@ -26,8 +33,8 @@ use crate::sources::{
 
 /// How often devices are looked for again: network interfaces, disks, GPUs, hwmon chips.
 pub const REDISCOVER_EVERY: Duration = Duration::from_secs(60);
-/// How often the root filesystem's space is checked (D2: mounts every 30 s).
-const ROOT_FS_EVERY: Duration = Duration::from_secs(30);
+/// How often the probe is asked for the mounts and their space (D2).
+pub const MOUNTS_EVERY: Duration = Duration::from_secs(30);
 /// How often `nvme` drive temperatures are reread. Each read is a SMART command to the drive, which
 /// blocks the sampler (one more wakeup) and wakes the drive's controller from its idle power
 /// state; a drive heats up over minutes, so a warning 30 s late is still in time.
@@ -266,10 +273,9 @@ pub struct Readers {
     cards: Vec<Card>,
     cpu_chip: Option<Chip>,
     drives: Vec<Drive>,
-    /// Whether this runs in a Flatpak sandbox, where `/` is not the host's (the probe reads
-    /// mounts in P2).
-    in_flatpak: bool,
-    root_fs: Option<(Instant, Option<FsUsage>)>,
+    probe: Box<dyn Probe>,
+    /// The last mounts and when they were asked for.
+    mounts: Option<(Instant, Vec<Mount>)>,
     /// The last drive temperatures and when they were read.
     drive_temps: Option<(Instant, Vec<DriveTemp>)>,
     discovered_at: Option<Instant>,
@@ -278,8 +284,9 @@ pub struct Readers {
 }
 
 impl Readers {
+    /// Readers that ask `probe` for what the sandbox can't see.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(probe: Box<dyn Probe>) -> Self {
         Self {
             stat: None,
             meminfo: None,
@@ -292,16 +299,16 @@ impl Readers {
             cards: Vec::new(),
             cpu_chip: None,
             drives: Vec::new(),
-            in_flatpak: Path::new("/.flatpak-info").exists(),
-            root_fs: None,
+            probe,
+            mounts: None,
             drive_temps: None,
             discovered_at: None,
             failed: false,
         }
     }
 
-    /// Reads one sample at `now`.
-    pub fn read(&mut self, now: Instant) -> Sample {
+    /// Reads one sample at `now`; with the top processes when `open` (the open tier).
+    pub fn read(&mut self, now: Instant, open: bool) -> Sample {
         let due = self
             .discovered_at
             .is_none_or(|at| now.duration_since(at) >= REDISCOVER_EVERY);
@@ -311,7 +318,6 @@ impl Readers {
             self.failed = false;
         }
         let drives = self.drives(now);
-        let root_fs = self.root_fs(now);
         let failed = &mut self.failed;
         let read = |slot: &mut Option<Pread>, failed: &mut bool| {
             slot.as_mut().and_then(|f| {
@@ -326,7 +332,7 @@ impl Readers {
         let disks = read(&mut self.diskstats, failed).map_or_else(Vec::new, |t| {
             diskstats::whole_disks(diskstats::parse(&t), &self.physical_disks)
         });
-        Sample {
+        let mut sample = Sample {
             stat: self
                 .stat
                 .as_mut()
@@ -351,8 +357,15 @@ impl Readers {
             },
             drives,
             gpus: self.cards.iter_mut().map(|c| c.sample(failed)).collect(),
-            root_fs,
+            mounts: Vec::new(),
+            processes: None,
+        };
+        // After the counters, so a slow probe doesn't skew the rates measured from `now`.
+        sample.mounts = self.mounts(now);
+        if open {
+            sample.processes = self.probe.processes();
         }
+        sample
     }
 
     /// The drives' temperatures, reread every [`DRIVE_TEMP_EVERY`].
@@ -378,24 +391,24 @@ impl Readers {
         temps
     }
 
-    fn root_fs(&mut self, now: Instant) -> Option<FsUsage> {
-        if self.in_flatpak {
-            return None;
+    /// With `SYSMON_DEBUG`, asks for the processes once, so the probe's first process reply is
+    /// logged without opening the popup.
+    pub fn debug_probe(&mut self) {
+        if crate::probe_client::debug() {
+            self.probe.processes();
         }
-        match self.root_fs {
-            Some((at, usage)) if now.duration_since(at) < ROOT_FS_EVERY => usage,
-            _ => {
-                let usage = rustix::fs::statvfs("/").ok().map(|s| FsUsage {
-                    used: s
-                        .f_blocks
-                        .saturating_sub(s.f_bfree)
-                        .saturating_mul(s.f_frsize),
-                    total: s.f_blocks.saturating_mul(s.f_frsize),
-                });
-                self.root_fs = Some((now, usage));
-                usage
-            }
+    }
+
+    /// The mounts, asked for again every [`MOUNTS_EVERY`]; empty without a probe.
+    fn mounts(&mut self, now: Instant) -> Vec<Mount> {
+        if let Some((at, mounts)) = &self.mounts
+            && now.duration_since(*at) < MOUNTS_EVERY
+        {
+            return mounts.clone();
         }
+        let mounts = self.probe.mounts().unwrap_or_default();
+        self.mounts = Some((now, mounts.clone()));
+        mounts
     }
 
     fn discover(&mut self) {
@@ -533,7 +546,58 @@ fn sorted_entries(dir: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use sysmon_proto::{Reply, Request, TopProcesses};
+
     use super::*;
+    use crate::probe_client::Unavailable;
+
+    /// A probe that records what it is asked and answers with nothing.
+    #[derive(Debug, Default, Clone)]
+    struct Recorder(Arc<Mutex<Vec<Request>>>);
+
+    impl Probe for Recorder {
+        fn ask(&mut self, request: Request) -> Option<Reply> {
+            self.0.lock().unwrap().push(request);
+            Some(match request {
+                Request::Processes { .. } => Reply::Processes(TopProcesses::default()),
+                Request::Mounts => Reply::Mounts { mounts: vec![] },
+                Request::Gpus { .. } => Reply::Unsupported,
+                Request::Release => Reply::Released,
+            })
+        }
+    }
+
+    #[test]
+    fn mounts_every_30_s_in_both_tiers_and_processes_only_while_open() {
+        let recorder = Recorder::default();
+        let mut readers = Readers::new(Box::new(recorder.clone()));
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let closed = readers.read(t0, false);
+        assert!(closed.processes.is_none());
+        readers.read(t0 + s(2), false);
+        let open = readers.read(t0 + s(4), true);
+        assert!(open.processes.is_some());
+        readers.read(t0 + s(30), false);
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            [
+                Request::Mounts,
+                Request::Processes { top: 5 },
+                Request::Mounts
+            ]
+        );
+    }
+
+    #[test]
+    fn without_a_probe_there_are_no_mounts_or_processes() {
+        let mut readers = Readers::new(Box::new(Unavailable));
+        let sample = readers.read(Instant::now(), true);
+        assert_eq!(sample.mounts, []);
+        assert!(sample.processes.is_none());
+    }
 
     #[test]
     fn pread_rereads_a_file_from_the_start() {
@@ -564,8 +628,8 @@ mod tests {
 
     #[test]
     fn reads_this_machine_s_procfs() {
-        let mut readers = Readers::new();
-        let sample = readers.read(Instant::now());
+        let mut readers = Readers::new(Box::new(Unavailable));
+        let sample = readers.read(Instant::now(), false);
         assert!(sample.stat.is_some_and(|s| !s.cores.is_empty()));
         assert!(sample.mem.is_some());
         assert!(sample.load.is_some());
