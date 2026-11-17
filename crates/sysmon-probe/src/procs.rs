@@ -15,6 +15,7 @@
 //! baseline and waits [`BASELINE`], so the first list after opening the popup is already real.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,8 @@ pub const BASELINE: Duration = Duration::from_millis(250);
 const MAX_PIDS: usize = 65_536;
 /// The kernel cuts `comm` at this many bytes.
 const COMM_LEN: usize = 15;
+/// Room for a whole `/proc/<pid>/stat` in one read: 52 numbers and a 15-byte `comm`.
+const STAT_BUF: usize = 4096;
 
 /// One `/proc/<pid>/stat`, the fields a list needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,16 +52,26 @@ pub fn parse_stat(text: &str) -> Option<PidStat> {
     let open = text.find('(')?;
     let close = text.rfind(')')?;
     let pid = text[..open].trim().parse().ok()?;
-    let comm = text.get(open + 1..close)?.to_owned();
-    // Fields from the third (`state`) on; field n is at index n - 3.
-    let rest: Vec<&str> = text[close + 1..].split_ascii_whitespace().collect();
-    let field = |n: usize| rest.get(n - 3)?.parse::<u64>().ok();
+    let comm = text.get(open + 1..close)?;
+    // Fields from the third (`state`) on, read in order without collecting them: `after`
+    // is the last field read, and the next one wanted is `n`.
+    let mut fields = text[close + 1..].split_ascii_whitespace();
+    let mut after = 2;
+    let mut field = |n: usize| {
+        let value = fields.nth(n - after - 1)?.parse::<u64>().ok();
+        after = n;
+        value
+    };
+    let utime = field(14)?;
+    let stime = field(15)?;
+    let start = field(22)?;
+    let rss_pages = field(24)?;
     Some(PidStat {
         pid,
-        comm,
-        ticks: field(14)?.saturating_add(field(15)?),
-        start: field(22)?,
-        rss_pages: field(24)?,
+        comm: comm.to_owned(),
+        ticks: utime.saturating_add(stime),
+        start,
+        rss_pages,
     })
 }
 
@@ -229,9 +242,14 @@ impl Scanner {
         result
     }
 
+    /// Reads `/proc/stat` and every `/proc/<pid>/stat`. Most of a scan's cost is the kernel
+    /// writing those files, so each is read with one `read` into a buffer kept for the whole
+    /// scan, instead of `fs::read_to_string`'s `statx`, allocation and second `read` per file.
     fn snapshot(&self) -> Option<Snapshot> {
-        let total = parse_cpu_total(&std::fs::read_to_string(self.proc.join("stat")).ok()?)?;
+        let mut buf = Vec::with_capacity(STAT_BUF);
+        let total = parse_cpu_total(read_into(&self.proc.join("stat"), &mut buf)?)?;
         let mut pids = Vec::new();
+        let mut path = self.proc.to_path_buf();
         for entry in std::fs::read_dir(self.proc).ok()?.flatten().take(MAX_PIDS) {
             let name = entry.file_name();
             let Some(name) = name.to_str() else {
@@ -240,16 +258,33 @@ impl Scanner {
             if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
                 continue;
             }
+            path.push(name);
+            path.push("stat");
             // A process may exit between the listing and the read.
-            if let Some(stat) = std::fs::read_to_string(entry.path().join("stat"))
-                .ok()
-                .and_then(|t| parse_stat(&t))
-            {
+            if let Some(stat) = read_into(&path, &mut buf).and_then(parse_stat) {
                 pids.push(stat);
             }
+            path.pop();
+            path.pop();
         }
         Some(Snapshot { total, pids })
     }
+}
+
+/// The text of the file at `path`, read into `buf`: in one `read` when it fits in the space
+/// `buf` has, as a procfs file does when read whole at once.
+fn read_into<'a>(path: &Path, buf: &'a mut Vec<u8>) -> Option<&'a str> {
+    let mut file = std::fs::File::open(path).ok()?;
+    buf.clear();
+    buf.resize(buf.capacity().max(STAT_BUF), 0);
+    let room = buf.len();
+    let read = file.read(buf).ok()?;
+    buf.truncate(read);
+    if read == room {
+        // Full: there may be more.
+        file.read_to_end(buf).ok()?;
+    }
+    std::str::from_utf8(buf).ok()
 }
 
 #[cfg(test)]
@@ -311,6 +346,20 @@ mod tests {
     fn parse_stat_rejects_truncated_lines() {
         assert_eq!(parse_stat("12 (bash) S 1 2 3"), None);
         assert_eq!(parse_stat(""), None);
+    }
+
+    #[test]
+    fn read_into_reads_files_longer_than_the_buffer() {
+        let dir = std::env::temp_dir().join(format!("sysmon-procs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("long");
+        let text = "x".repeat(3 * STAT_BUF + 7);
+        std::fs::write(&path, &text).unwrap();
+        let mut buf = Vec::new();
+        assert_eq!(read_into(&path, &mut buf), Some(text.as_str()));
+        std::fs::write(&path, "short").unwrap();
+        assert_eq!(read_into(&path, &mut buf), Some("short"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

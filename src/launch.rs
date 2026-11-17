@@ -68,6 +68,9 @@ fn command(in_flatpak: bool) -> Command {
     };
     command
         .args(["-c", SCRIPT, "sh", PROCESS_MONITOR, PROCESS_MONITOR_EXEC])
+        // The applet's own runtime setting; the monitor runs outside a Flatpak with our
+        // environment.
+        .env_remove(crate::TOKIO_WORKER_THREADS)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -101,6 +104,17 @@ mod tests {
         assert_eq!(args[..2], ["sh", "-c"]);
         assert_eq!(args[2], SCRIPT);
         assert_eq!(args[3..], ["sh", PROCESS_MONITOR, PROCESS_MONITOR_EXEC]);
+    }
+
+    #[test]
+    fn keeps_the_applet_s_worker_count_to_itself() {
+        for in_flatpak in [true, false] {
+            let command = command(in_flatpak);
+            let removed = command
+                .get_envs()
+                .any(|(name, value)| name == crate::TOKIO_WORKER_THREADS && value.is_none());
+            assert!(removed, "in_flatpak: {in_flatpak}");
+        }
     }
 
     #[test]

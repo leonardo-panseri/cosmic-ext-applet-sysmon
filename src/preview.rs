@@ -12,15 +12,22 @@
 //! at once, cut in two halves side by side, instead of scrolling it. `SYSMON_PREVIEW_SETTINGS=1`
 //! starts on the settings page. The file is `RGBA`, the width and height as
 //! little-endian `u32`s, then the pixels; `tools/screenshots.py` turns it into a PNG.
+//!
+//! `SYSMON_PREVIEW_LIVE=1` instead feeds the preview from the real sampler, as the panel does
+//! (closed tier, or open tier with `SYSMON_DEBUG_OPEN`), to measure redraws and wakeups in an
+//! ordinary window; `SYSMON_DEBUG` then logs the redraw counts of each sample.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cosmic::iced::gradient::Linear;
-use cosmic::iced::{Background, Border, Color, Gradient, Length, Limits, Radians, Size, window};
+use cosmic::iced::{
+    Background, Border, Color, Gradient, Length, Limits, Radians, Size, Subscription, window,
+};
 use cosmic::prelude::*;
 use cosmic::widget;
 
-use crate::app::Message;
+use crate::app::{self, Message};
 use crate::panel::{PanelSettings, PanelSummary};
 use crate::sampler::history::{HISTORY_LEN, History};
 use crate::sampler::rates::PairRate;
@@ -31,6 +38,7 @@ use crate::sources::meminfo::MemInfo;
 use crate::ui::panel_button::panel_button;
 use crate::ui::popup::{self, Page};
 use crate::ui::settings::SettingsModels;
+use crate::{redraws, sampler};
 use sysmon_proto::{Mount, Process, TopProcesses};
 
 /// As wide as the panel's popup at most.
@@ -69,13 +77,19 @@ struct Preview {
     core: cosmic::Core,
     /// Where the screenshot goes, in screenshot mode.
     shot: Option<String>,
-    stats: Stats,
+    stats: Arc<Stats>,
     settings: PanelSettings,
     models: SettingsModels,
     summary: PanelSummary,
     page: Page,
     /// The stats page grows instead of scrolling.
     full: bool,
+    /// Fed by the real sampler (`SYSMON_PREVIEW_LIVE`).
+    live: bool,
+    /// The live sampler, once started.
+    sampler: Option<sampler::SamplerHandle>,
+    /// When the last live sample arrived, for the redraw counts.
+    last_sample: Option<Instant>,
 }
 
 impl cosmic::Application for Preview {
@@ -104,7 +118,8 @@ impl cosmic::Application for Preview {
             }
             _ => Task::none(),
         };
-        let stats = fixture();
+        let live = shot.is_none() && std::env::var_os("SYSMON_PREVIEW_LIVE").is_some();
+        let stats = Arc::new(fixture());
         let settings = PanelSettings::default();
         let summary = PanelSummary::new(
             &stats,
@@ -124,12 +139,33 @@ impl cosmic::Application for Preview {
                 Page::Stats
             },
             full: std::env::var_os("SYSMON_PREVIEW_FULL").is_some(),
+            live,
+            sampler: None,
+            last_sample: None,
         };
         (preview, task)
     }
 
+    fn subscription(&self) -> Subscription<Message> {
+        if self.live {
+            Subscription::run(app::sampler_messages)
+        } else {
+            Subscription::none()
+        }
+    }
+
     fn update(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
+        redraws::count(redraws::Event::Update);
         match message {
+            Message::SamplerStarted(handle) => {
+                handle.send(sampler::Control::Settings(self.settings.clone()));
+                self.sampler = Some(handle);
+            }
+            Message::Sampled(update) => {
+                redraws::log_on_sample(&mut self.last_sample);
+                self.summary = update.panel;
+                self.stats = update.stats;
+            }
             Message::ShowPage(page) => self.page = page,
             Message::OpenProcessMonitor => eprintln!("preview: would open the process monitor"),
             // Applied here only: the preview stores nothing.
@@ -145,6 +181,7 @@ impl cosmic::Application for Preview {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        redraws::count(redraws::Event::ViewWindow);
         let popup: Element<'_, Message> = if self.full && self.page == Page::Stats {
             let [first, second] = popup::stats_page_halves(&self.stats, &self.settings, 3);
             widget::Row::new()

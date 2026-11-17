@@ -17,7 +17,7 @@ use crate::sampler::{self, Control, SamplerHandle, Update};
 use crate::ui::panel_button::{self, panel_button};
 use crate::ui::popup::{self, Page};
 use crate::ui::settings::{SettingChange, SettingsModels};
-use crate::{config, launch, upower};
+use crate::{config, launch, redraws, upower};
 
 /// The applet's state.
 pub struct AppModel {
@@ -42,6 +42,8 @@ pub struct AppModel {
     panel: Option<PanelSummary>,
     /// The last sample with its history, for the popup.
     stats: Option<Arc<Stats>>,
+    /// When the last sample arrived, for the `SYSMON_DEBUG` redraw counts.
+    last_sample: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +136,7 @@ impl cosmic::Application for AppModel {
             sent_horizontal: None,
             panel: None,
             stats: None,
+            last_sample: None,
         };
         (app, Task::none())
     }
@@ -151,6 +154,7 @@ impl cosmic::Application for AppModel {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
+        redraws::count(redraws::Event::View);
         let applet = &self.core.applet;
         // The button takes only left clicks, so a right click reaches the mouse area. The mouse
         // area lays out as its content, so it changes neither the size nor the hover highlight.
@@ -168,6 +172,7 @@ impl cosmic::Application for AppModel {
     }
 
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
+        redraws::count(redraws::Event::ViewWindow);
         let content = popup::view(
             self.stats.as_deref(),
             &self.settings,
@@ -179,6 +184,7 @@ impl cosmic::Application for AppModel {
     }
 
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
+        redraws::count(redraws::Event::Update);
         self.sync_orientation();
         match message {
             Message::TogglePopup => {
@@ -228,6 +234,7 @@ impl cosmic::Application for AppModel {
                 self.popup_changed();
             }
             Message::Sampled(update) => {
+                redraws::log_on_sample(&mut self.last_sample);
                 self.panel = Some(update.panel);
                 self.stats = Some(update.stats);
             }
@@ -261,7 +268,7 @@ impl cosmic::Application for AppModel {
 
 /// Starts the sampler thread and forwards its updates as messages; meanwhile watches `UPower` and
 /// tells the sampler when the machine goes on or off battery, without going through `update()`.
-fn sampler_messages() -> impl Stream<Item = Message> {
+pub(crate) fn sampler_messages() -> impl Stream<Item = Message> {
     cosmic::iced::stream::channel(1, async |mut output| {
         // The stored settings as `init` read them; a change since follows as a control message.
         let (_, settings) = config::load(<AppModel as cosmic::Application>::APP_ID);

@@ -16,6 +16,7 @@ use cosmic::prelude::*;
 use cosmic::widget::canvas::{self, Frame, Geometry, Path};
 
 use crate::app::Message;
+use crate::redraws;
 use crate::sampler::history::{HISTORY_LEN, History};
 
 /// The graphs' height.
@@ -98,10 +99,14 @@ impl Cached {
         key: u64,
         draw: impl FnOnce(&mut Frame<cosmic::Renderer>),
     ) -> Geometry<cosmic::Renderer> {
+        redraws::count(redraws::Event::CanvasDraw);
         if self.key.replace(key) != key {
             self.cache.clear();
         }
-        self.cache.draw(renderer, bounds.size(), draw)
+        self.cache.draw(renderer, bounds.size(), |frame| {
+            redraws::count(redraws::Event::CanvasRebuild);
+            draw(frame);
+        })
     }
 }
 
