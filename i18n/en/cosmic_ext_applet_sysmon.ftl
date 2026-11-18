@@ -8,6 +8,7 @@ cpu = CPU
 memory = RAM
 gpu = GPU
 disk = Disk
+network = Network
 download = ↓
 upload = ↑
 no-value = –
@@ -24,6 +25,7 @@ uptime-days = up { $days }d { $hours }h
 uptime-hours = up { $hours }h { $minutes }m
 uptime-minutes = up { $minutes }m
 # Section headers, shown as written.
+section-cpu = CPU
 section-memory = MEMORY
 section-gpu = GPU
 section-network = NETWORK
@@ -65,11 +67,13 @@ setting-bottom-row = BOTTOM ROW
 setting-warn = WARN AT OR ABOVE
 layout-stacked = Stacked
 layout-one-line = One line
-layout-compact = Compact
-# The CPU temperature, as a choice for a panel row.
-row-cpu-temp = CPU °C
-setting-network = Network speed
-setting-network-description = Download and upload
+# The way to the builder, and its title.
+panel-button = Panel button
+# Under "Panel button": "Stacked · 4 items".
+setting-panel-button-description = { $layout } · { $items ->
+    [one] { $items } item
+   *[other] { $items } items
+}
 setting-process-monitor = Process monitor
 setting-process-monitor-hint = Desktop ID or command
 setting-process-monitor-reset = Reset to default
@@ -90,6 +94,43 @@ setting-warn-nvme = NVMe temperature
 setting-warn-nvme-description = Empty: rated limit
 # The NVMe limit's field while it is each drive's own rated limit.
 setting-limit-rated = Rated
+
+## Popup: the panel button's builder
+
+builder-hint = Select an item to move it, remove it or choose what it shows. Add items with +.
+builder-add = Add an item
+builder-add-top = Add to the top row
+builder-add-bottom = Add to the bottom row
+builder-move-left = Move left
+builder-move-right = Move right
+builder-to-top-row = To top row
+builder-to-bottom-row = To bottom row
+builder-remove = Remove
+# The caption over an item's choices of what it shows.
+builder-target-mount = MOUNT POINT
+builder-target-disk = DISK
+builder-target-drive = DRIVE
+builder-target-interface = INTERFACE
+# The items, by their full names.
+item-cpu = CPU usage
+item-cpu-temp = CPU temperature
+item-ram = RAM
+item-swap = Swap
+item-gpu = GPU usage
+item-gpu-temp = GPU temperature
+item-vram = VRAM
+item-disk-usage = Disk usage
+item-disk-read = Disk read
+item-disk-write = Disk write
+item-nvme-temp = NVMe temperature
+item-download = Download
+item-upload = Upload
+# An item and what it shows: "GPU usage · RTX 4060".
+item-with-target = { $kind } · { $target }
+# What an item shows.
+target-auto = Auto
+target-all-disks = All disks
+target-all-interfaces = All interfaces
 
 ## Panel button: the tooltip, one line per warning
 

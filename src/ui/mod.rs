@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Widgets (plan §3.1): the panel button, the popup's pages, the graph canvas and their icons.
+//! Widgets (plan §3.1): the panel button, the popup's pages (stats, settings and the
+//! panel button's builder), the graph canvas and their icons.
 
+pub mod builder;
 pub mod columns;
 pub mod graph;
 pub mod icons;

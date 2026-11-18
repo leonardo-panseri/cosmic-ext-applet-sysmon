@@ -8,8 +8,23 @@ nothing while nobody is looking at it. See `docs/implementation-plan.md` and `do
 ### What the user sees
 
 **Panel button**:
-What sits in the panel: one or two rows of values, with optional network rates.
+What sits in the panel: two **rows** of **items**, Stacked or on One line (`docs/panel-builder.md`).
 _Avoid_: bar, widget, indicator
+
+**Item**:
+One value on the panel button with its icon, such as CPU usage, a GPU's temperature or a mount's usage.
+Some name a target: a GPU (Auto, or one by PCI address), a mount point, a disk, a drive or an interface.
+_Avoid_: row (for a single value), cell, widget, metric
+
+**Row**:
+One of the panel button's two ordered lists of up to four items: the top row and the bottom row. On a
+vertical panel a row may stand as a column; it is still a row.
+_Avoid_: line, line of items
+
+**Builder**:
+The settings page's sub-page that edits the panel button: a live preview, the layout, and the rows as
+chips.
+_Avoid_: editor, designer
 
 **Popup**:
 The window opened from the panel button. It has a **stats page** and a **settings page**.
@@ -20,7 +35,8 @@ One column or two; **Auto** takes two when one would need scrolling on the panel
 _Avoid_: mode, view, wide popup
 
 **Warning**:
-A value at or above its limit. It colours its own row, or the whole panel button when the value isn't shown there.
+A value at or above its limit. It colours the items that own it (those of its device), or the whole panel
+button when no item shown owns it.
 _Avoid_: alert, alarm
 
 ### How values are gathered

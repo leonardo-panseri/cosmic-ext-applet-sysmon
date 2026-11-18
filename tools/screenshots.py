@@ -7,9 +7,9 @@ backdrop in COSMIC's default dark theme, from fixed made-up stats (nothing is
 read from the system, so no GPU is woken), saves its own window's pixels and
 exits; this script writes them out as a PNG.
 
-The panel-* shots show the panel button alone, in its layouts and on
-vertical panels, to check it by eye; they go to target/screenshots/, not into
-the metainfo.
+The other shots (the panel button alone, in its layouts and on vertical
+panels, and the builder in more states) are for checking by eye; they go to
+target/screenshots/, not into the metainfo.
 
 Needs cargo, a running Wayland session and Python 3.11+ (stdlib only). Usage:
 
@@ -44,6 +44,21 @@ SHOTS = {
     "popup": {"SYSMON_PREVIEW_HEIGHT": "920"},
     # The settings page, in the same two-column popup.
     "settings": {"SYSMON_PREVIEW_SETTINGS": "1", "SYSMON_PREVIEW_HEIGHT": "620"},
+    # The panel button's builder with four items over three, a GPU item selected.
+    "builder": {"SYSMON_PREVIEW_BUILDER": "selected", "SYSMON_PREVIEW_ROWS": "custom",
+                "SYSMON_PREVIEW_HEIGHT": "620"},
+}
+# The shots the metainfo shows; the rest go to CHECK_DIR.
+METAINFO = set(SHOTS)
+
+# The builder in other states, and in one column.
+SHOTS |= {
+    "builder-picker": {"SYSMON_PREVIEW_BUILDER": "picker", "SYSMON_PREVIEW_HEIGHT": "760"},
+    "builder-one-column": {"SYSMON_PREVIEW_BUILDER": "selected", "SYSMON_PREVIEW_ROWS": "custom",
+                           "SYSMON_PREVIEW_COLUMNS": "1", "SYSMON_PREVIEW_HEIGHT": "900"},
+    "builder-one-column-picker": {"SYSMON_PREVIEW_BUILDER": "picker",
+                                  "SYSMON_PREVIEW_COLUMNS": "1", "SYSMON_PREVIEW_HEIGHT": "900"},
+    "builder-empty": {"SYSMON_PREVIEW_BUILDER": "1", "SYSMON_PREVIEW_HEIGHT": "620"},
 }
 
 # The panel button alone, on an S panel unless named otherwise.
@@ -120,7 +135,7 @@ def main() -> int:
     subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
     for name in names:
         width, height, pixels = crop(*capture(SHOTS[name]), BORDER)
-        out_dir = CHECK_DIR if name.startswith("panel-") else OUT_DIR
+        out_dir = OUT_DIR if name in METAINFO else CHECK_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / f"{name}.png"
         out.write_bytes(png(width, height, pixels))

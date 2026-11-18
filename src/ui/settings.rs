@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The popup's settings page (plan §2.3): the panel button's layout and rows, the network rates,
-//! the process monitor, the popup's columns and the warning limits. Every change applies at once; the app stores it
+//! The popup's settings page (plan §2.3): the way to the panel button's builder
+//! ([`super::builder`]), the process monitor, the popup's columns and the warning limits. Every change applies at once; the app stores it
 //! and tells the sampler. Typed text is a draft until Enter or leaving the field: then it is
 //! saved if valid, else dropped, and the field shows the setting again.
 
@@ -12,6 +12,7 @@ use cosmic::prelude::*;
 use cosmic::widget::segmented_button::{self, Entity, SingleSelectModel, StyleSheet};
 use cosmic::widget::{self, icon, segmented_control, settings};
 
+use super::builder::{Builder, BuilderChange};
 use super::columns::Columns;
 use super::popup::{self, Page};
 use crate::app::Message;
@@ -35,6 +36,8 @@ pub enum SettingChange {
     Layout(Entity),
     /// A segment of the popup's columns.
     PopupLayout(Entity),
+    /// A change on the panel button's builder.
+    Builder(BuilderChange),
     /// A warning turned on or off.
     WarnOn(LimitKind, bool),
     /// A limit set with − or +.
@@ -58,6 +61,8 @@ pub struct SettingsModels {
     layout: SingleSelectModel,
     popup_layout: SingleSelectModel,
     drafts: HashMap<Field, String>,
+    /// The builder's selection and picker.
+    builder: Builder,
 }
 
 impl SettingsModels {
@@ -68,6 +73,7 @@ impl SettingsModels {
             layout: model(&Layout::ALL, layout_label),
             popup_layout: model(&PopupLayout::ALL, popup_layout_label),
             drafts: HashMap::new(),
+            builder: Builder::default(),
         };
         models.select(settings);
         models
@@ -77,6 +83,23 @@ impl SettingsModels {
     pub fn select(&mut self, settings: &PanelSettings) {
         select(&mut self.layout, &settings.layout);
         select(&mut self.popup_layout, &settings.popup_layout);
+    }
+
+    /// The layout's segmented control, which the builder shows.
+    #[must_use]
+    pub fn layout(&self) -> &SingleSelectModel {
+        &self.layout
+    }
+
+    /// The builder's selection and picker.
+    #[must_use]
+    pub fn builder(&self) -> &Builder {
+        &self.builder
+    }
+
+    /// The builder as it opens: nothing selected, no picker.
+    pub fn reset_builder(&mut self) {
+        self.builder.reset();
     }
 
     /// What `field` shows: its draft, or `settings`' value.
@@ -110,6 +133,7 @@ impl SettingsModels {
                 settings.popup_layout =
                     value(&self.popup_layout, item).unwrap_or(settings.popup_layout);
             }
+            SettingChange::Builder(change) => self.builder.change(change, &mut settings.rows),
             SettingChange::WarnOn(kind, on) => match settings.limit_mut(kind) {
                 Some(limit) => limit.on = on,
                 None => settings.warn_nvme.on = on,
@@ -297,7 +321,7 @@ pub fn view<'a>(
         .map(|kind| limit_item(models, settings, kind))
         .collect();
     let panel_button = vec![
-        choice(fl!("setting-layout"), &models.layout, SettingChange::Layout),
+        panel_button_entry(settings),
         widget::divider::horizontal::default().into(),
         process_monitor(models, settings),
     ];
@@ -347,7 +371,32 @@ pub fn view<'a>(
 }
 
 /// The page's title with the space under it, which the stats page doesn't have.
-const TITLE_HEIGHT: f32 = 47.0;
+pub(super) const TITLE_HEIGHT: f32 = 47.0;
+
+/// The way to the builder: "Panel button", the layout and how many items, and an arrow.
+fn panel_button_entry<'a>(settings: &PanelSettings) -> Element<'a, Message> {
+    let spacing = cosmic::theme::spacing();
+    let count = i64::try_from(settings.rows.items().count()).unwrap_or(0);
+    let description = fl!(
+        "setting-panel-button-description",
+        layout = layout_label(settings.layout),
+        items = count
+    );
+    let text = widget::Column::new()
+        .push(widget::text::body(fl!("panel-button")))
+        .push(popup::muted(widget::text::caption(description)));
+    let content = widget::Row::new()
+        .spacing(spacing.space_xs)
+        .align_y(Alignment::Center)
+        .push(text.width(Length::Fill))
+        .push(icon::from_name("go-next-symbolic").size(16).icon());
+    widget::button::custom(content)
+        .width(Length::Fill)
+        .padding([spacing.space_xxs, 0])
+        .class(cosmic::theme::Button::MenuItem)
+        .on_press(Message::ShowPage(Page::Builder))
+        .into()
+}
 
 /// The process monitor's field, under its title and hint, with a reset to the default.
 fn process_monitor<'a>(models: &SettingsModels, settings: &PanelSettings) -> Element<'a, Message> {

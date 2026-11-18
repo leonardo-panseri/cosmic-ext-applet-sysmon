@@ -234,6 +234,7 @@ impl cosmic::Application for AppModel {
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
         redraws::count(redraws::Event::ViewWindow);
         let content = popup::view(
+            &self.core.applet,
             self.stats.as_deref(),
             &self.settings,
             &self.models,
@@ -294,6 +295,9 @@ impl cosmic::Application for AppModel {
             }
             Message::ShowPage(page) => {
                 self.change_setting(SettingChange::CommitAll);
+                if page != self.page {
+                    self.models.reset_builder();
+                }
                 self.page = page;
             }
             Message::PopupClosed(id) => {

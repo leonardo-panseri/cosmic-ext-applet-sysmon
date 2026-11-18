@@ -33,7 +33,11 @@
     </screenshot>
     <screenshot>
       <image>https://raw.githubusercontent.com/leonardo-panseri/cosmic-ext-applet-sysmon/main/resources/screenshots/settings.png</image>
-      <caption>Choosing what the panel button shows, the popup's layout and when it warns</caption>
+      <caption>The settings: the panel button, the process monitor, the popup's layout and when it warns</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/leonardo-panseri/cosmic-ext-applet-sysmon/main/resources/screenshots/builder.png</image>
+      <caption>Building the panel button: two rows of items, such as a GPU's temperature, a disk's usage or a drive's temperature</caption>
     </screenshot>
   </screenshots>
   <launchable type="desktop-id">io.github.leonardo_panseri.cosmic-ext-applet-sysmon.desktop</launchable>

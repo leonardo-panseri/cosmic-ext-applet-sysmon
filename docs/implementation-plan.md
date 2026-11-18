@@ -56,7 +56,7 @@ a D-Bus round trip plus a host shell reading every `/proc/<pid>/stat`, on every 
 | NVMe temps (each read is a SMART command) | every 30 s | every 30 s |
 | AMD iGPU sysfs | ✓ | ✓ |
 | dGPU `runtime_status` | ✓ (one small read) | ✓ |
-| dGPU NVML (only when `active`; every 15 s after 3 idle samples, ADR 0003) | if the panel button shows `gpu` or an NVIDIA warning (GPU temperature, VRAM) is enabled; only when awake, with the ADR 0003 back-off | ✓ |
+| dGPU NVML (only when `active`; every 15 s after 3 idle samples, ADR 0003) | if the panel button shows a GPU item (Auto: any card; else only while its own card is awake) or an NVIDIA warning (GPU temperature, VRAM) is enabled; only when awake, with the ADR 0003 back-off | ✓ |
 | Top processes | – | ✓ (probe) |
 | Mounts + space | every 30 s (probe) | every 30 s (probe) |
 
@@ -140,25 +140,25 @@ and names clipped to 64 chars. Probe replies are capped in size. All system-supp
 
 ### 2.1 Panel button
 
-Same three layouts as the reference:
+**Superseded by [`docs/panel-builder.md`](panel-builder.md)**, which replaced the fixed rows: two rows of
+up to four **items** each (CPU, memory, GPU, disk and network values, some for a chosen GPU, mount, disk,
+drive or interface), laid out **Stacked** or on **One line**; Compact is gone. On a vertical panel the
+items stand in one column, or for Stacked in two (the top row on the left) where both fit at about 9 px.
 
-- **Stacked** (default): two small rows in one panel slot. Each row is an icon and a value (CPU, RAM, GPU, Disk, CPU °C),
-  with ↓/↑ network rates beside them if enabled.
-- **One line:** both values and the rates on one line.
-- **Compact:** only the top row, its icon beside the value (above it on a vertical panel).
+**Warnings:** an item turns the theme's destructive colour when a warning it owns is active: the warnings
+about its own device's values (below, the owners in brackets). If no item shown owns an active warning,
+the whole button turns that colour. The tooltip lists every active warning. Left click toggles the popup.
+Right click opens the process monitor.
 
-On a vertical panel, Stacked and One line become Compact. **Warnings:** a row turns the theme's destructive
-colour when its own value crosses a limit. If the problem is something not shown on the panel button, the whole button
-turns that colour, and the tooltip says what's wrong. Left click toggles the popup. Right click opens the process monitor.
-
-Warn when (each with its own switch and limit; the row that owns it in brackets):
-- CPU temperature ≥ `warn_cpu_temp` (85 °C) [CPU, CPU °C]
-- any GPU temperature ≥ `warn_gpu_temp` (85 °C) [GPU, for the card it shows]
-- any GPU's VRAM in use ≥ `warn_vram` (90 %, off) [GPU, for the card it shows]
+Warn when (each with its own switch and limit; the items that own it in brackets):
+- CPU temperature ≥ `warn_cpu_temp` (85 °C) [CPU usage, CPU temperature]
+- any GPU temperature ≥ `warn_gpu_temp` (85 °C) [any GPU item showing that card]
+- any GPU's VRAM in use ≥ `warn_vram` (90 %, off) [any GPU item showing that card]
 - memory in use ≥ `warn_memory` (90 %) [RAM]
-- swap in use ≥ `warn_swap` (50 %, off) [RAM]
-- any filesystem ≥ `warn_disk` (90 %) [Disk, for `/`]
-- an NVMe drive ≥ `warn_nvme`: its own rated limit (hwmon `temp*_crit`/`temp*_max`) unless overridden [none]
+- swap in use ≥ `warn_swap` (50 %, off) [RAM, Swap]
+- any filesystem ≥ `warn_disk` (90 %) [Disk usage of that mount]
+- an NVMe drive ≥ `warn_nvme`: its own rated limit (hwmon `temp*_crit`/`temp*_max`) unless overridden
+  [NVMe temperature of that drive]
 
 No CPU load warning: a busy CPU is normal and transient, and its temperature already catches a problem.
 
@@ -198,20 +198,20 @@ lowest and highest value since the applet started, kept in memory by the sampler
 
 Inside the popup, like the reference and like codexbar's panel page:
 
-- Layout: Stacked / One line / Compact
-- Top row and bottom row: CPU / RAM / GPU / Disk / CPU °C
-- Network speed: toggle
+- Panel button: opens the builder of [`docs/panel-builder.md`](panel-builder.md) (live preview, layout,
+  the two rows of items), which replaced the Layout, Top row, Bottom row and Network speed controls
 - Process monitor: a desktop ID or command (D5), with a reset to the default
 - Popup layout: Auto / One column / Two columns (§2.2)
 - Warn at or above: each warning of §2.1 with a switch and its limit, typed or set with − and +
 - Back
 
-In two columns the page splits too: the panel button's choices, network and process monitor beside the popup
+In two columns the page splits too: the panel button's entry and the process monitor beside the popup
 layout and the warnings.
 
 Changes save immediately to cosmic-config and the panel updates live; a typed value on Enter or leaving the field,
-and only if valid (else the field shows the setting again). Defaults: `stacked`, top `cpu`, bottom `memory`, network
-on, popup layout `Auto`, the limits of §2.1. The old single `warn_temp` and `warn_usage` keys, if stored, are the
+and only if valid (else the field shows the setting again). Defaults: `Stacked`, the rows CPU usage and Download
+over RAM and Upload, popup layout `Auto`, the limits of §2.1. The old `top`, `bottom` and `network` keys,
+if stored, are the rows' default until `rows` is stored, and an old `Compact` layout reads as Stacked. The old single `warn_temp` and `warn_usage` keys, if stored, are the
 defaults of the CPU/GPU temperature and memory/disk limits until those are stored themselves; the config version
 stays 1, as it does for the added `popup_layout` key.
 
@@ -329,7 +329,7 @@ Each phase ends with something runnable and with its checks passing.
 
 ### P4 — GPUs
 - Spike S1, then NVIDIA via the probe, gated on `runtime_status`, with the idle back-off of ADR 0003. VRAM
-  cache (D4). Multiple GPUs, NVIDIA first. `gpu` on the panel button means "first awake GPU, NVIDIA first".
+  cache (D4). Multiple GPUs, NVIDIA first. A GPU item's Auto means "first awake GPU, NVIDIA first".
 - **Done when:**
   - running a GPU load with `prime-run` shows live NVIDIA stats
   - after the load ends, the card suspends again with the popup **open**: the back-off kicks in after 3 idle

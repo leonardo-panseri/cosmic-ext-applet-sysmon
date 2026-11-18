@@ -11,9 +11,9 @@ mod item;
 mod limits;
 
 pub use hysteresis::PanelHysteresis;
-#[cfg(test)]
-pub use item::DiskRef;
-pub use item::{DiskId, GpuRef, Item, NetRef, Row, Rows, ValueKind};
+pub use item::{
+    DiskId, DiskRef, GpuRef, Group, Item, NetRef, Row, Rows, Slot, ValueKind, choices, find_disk,
+};
 pub use limits::{Limit, LimitKind, NVME_STEP_FROM, NvmeLimit, Unit};
 
 use cosmic::cosmic_config::{self, CosmicConfigEntry, cosmic_config_derive::CosmicConfigEntry};
@@ -371,6 +371,7 @@ impl PanelSummary {
     }
 
     /// Every item, the top row first.
+    #[cfg(test)]
     pub fn items(&self) -> impl Iterator<Item = &ShownItem> {
         self.top.iter().chain(&self.bottom)
     }

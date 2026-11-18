@@ -30,7 +30,7 @@ use crate::panel::{LimitKind, PanelSettings, format};
 use crate::sampler::stats::{DiskStats, GpuSample, MinMax, Stats, share};
 use crate::ui::columns::Columns;
 use crate::ui::settings::{self, SettingsModels};
-use crate::ui::{graph, icons};
+use crate::ui::{builder, graph, icons};
 use sysmon_proto::{Mount, Process};
 
 /// The width of the value column of a stat row: "212G / 928G".
@@ -53,6 +53,8 @@ pub enum Page {
     Stats,
     /// The panel button's settings (§2.3).
     Settings,
+    /// The panel button's builder (`docs/panel-builder.md`), from the settings page.
+    Builder,
 }
 
 /// The popup's content, [`Columns::width`] wide: `page`, for `stats` (`None` before the first
@@ -60,6 +62,7 @@ pub enum Page {
 /// scrolls beyond `max_height`; the settings page shows `settings` with the segmented controls
 /// of `models`.
 pub fn view<'a>(
+    applet: &cosmic::applet::Context,
     stats: Option<&'a Stats>,
     settings: &PanelSettings,
     models: &'a SettingsModels,
@@ -83,6 +86,7 @@ pub fn view<'a>(
         }
         // Padded inside, around its scrollable area.
         Page::Settings => settings::view(models, settings, columns, max_height),
+        Page::Builder => builder::view(applet, stats, settings, models, columns, max_height),
     };
     widget::container(content)
         .padding([spacing.space_s, 0])
@@ -679,12 +683,12 @@ fn right(text: widget::Text<'_, cosmic::Theme>, width: f32) -> Element<'_, Messa
 }
 
 /// System-supplied text on one line, cut with an ellipsis when too long (D8).
-fn one_line(text: widget::Text<'_, cosmic::Theme>) -> widget::Text<'_, cosmic::Theme> {
+pub(super) fn one_line(text: widget::Text<'_, cosmic::Theme>) -> widget::Text<'_, cosmic::Theme> {
     text.wrapping(Wrapping::None)
         .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
 }
 
-fn muted(text: widget::Text<'_, cosmic::Theme>) -> widget::Text<'_, cosmic::Theme> {
+pub(super) fn muted(text: widget::Text<'_, cosmic::Theme>) -> widget::Text<'_, cosmic::Theme> {
     text.class(cosmic::theme::Text::Custom(|theme| {
         let mut color: Color = theme.cosmic().on_bg_color().into();
         color.a *= MUTED_ALPHA;

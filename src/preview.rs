@@ -12,7 +12,9 @@
 //! sets the window's height in that mode, which stands for the output's: the popup's room is
 //! measured from it as on the panel. `SYSMON_PREVIEW_COLUMNS=1|2|auto` (default `auto`) sets the
 //! popup's layout; outside screenshot mode `auto` measures the real output, from the same output
-//! events as the applet. `SYSMON_PREVIEW_SETTINGS=1` starts on the settings page. `SYSMON_PREVIEW_LAYOUT=stacked|one-line` picks the panel
+//! events as the applet. `SYSMON_PREVIEW_SETTINGS=1` starts on the settings page,
+//! `SYSMON_PREVIEW_BUILDER=1` on the panel button's builder (`=selected` with the third item of
+//! the top row selected, `=picker` with the bottom row's picker open). `SYSMON_PREVIEW_LAYOUT=stacked|one-line` picks the panel
 //! button's layout, `SYSMON_PREVIEW_ROWS=custom` four items over three (with GPU and `NVMe`
 //! items) instead of the default rows, and `COSMIC_PANEL_SIZE` (`XS`…`XL`) and
 //! `COSMIC_PANEL_ANCHOR` (`Left` for a vertical panel) its panel, as libcosmic reads them.
@@ -39,7 +41,7 @@ use cosmic::widget;
 use crate::app::{self, Message};
 use crate::outputs::Outputs;
 use crate::panel::{
-    DiskId, GpuRef, Item, Layout, NetRef, PanelSettings, PanelSummary, PopupLayout, Rows,
+    DiskId, GpuRef, Item, Layout, NetRef, PanelSettings, PanelSummary, PopupLayout, Row, Rows, Slot,
 };
 use crate::sampler::history::{HISTORY_LEN, History};
 use crate::sampler::rates::PairRate;
@@ -50,6 +52,7 @@ use crate::sampler::stats::{
 use crate::sources::drm::RuntimeStatus;
 use crate::sources::loadavg::LoadAvg;
 use crate::sources::meminfo::MemInfo;
+use crate::ui::builder::BuilderChange;
 use crate::ui::columns::{self, Columns, Room};
 use crate::ui::panel_button::panel_button;
 use crate::ui::popup::{self, Page};
@@ -257,7 +260,9 @@ impl cosmic::Application for Preview {
             models: SettingsModels::new(&settings),
             settings,
             summary,
-            page: if std::env::var_os("SYSMON_PREVIEW_SETTINGS").is_some() {
+            page: if std::env::var_os("SYSMON_PREVIEW_BUILDER").is_some() {
+                Page::Builder
+            } else if std::env::var_os("SYSMON_PREVIEW_SETTINGS").is_some() {
                 Page::Settings
             } else {
                 Page::Stats
@@ -269,6 +274,18 @@ impl cosmic::Application for Preview {
             sampler: None,
             last_sample: None,
         };
+        // The builder with a chip selected, or its picker open.
+        let start = match std::env::var("SYSMON_PREVIEW_BUILDER").as_deref() {
+            Ok("selected") => Some(BuilderChange::Select(Slot {
+                row: Row::Top,
+                index: 2,
+            })),
+            Ok("picker") => Some(BuilderChange::OpenPicker(Row::Bottom)),
+            _ => None,
+        };
+        if let Some(change) = start {
+            preview.change_setting(SettingChange::Builder(change));
+        }
         preview.choose_columns();
         (preview, task)
     }
@@ -304,6 +321,9 @@ impl cosmic::Application for Preview {
             }
             Message::ShowPage(page) => {
                 self.change_setting(SettingChange::CommitAll);
+                if page != self.page {
+                    self.models.reset_builder();
+                }
                 self.page = page;
             }
             Message::OpenProcessMonitor => eprintln!(
@@ -319,6 +339,7 @@ impl cosmic::Application for Preview {
     fn view(&self) -> Element<'_, Message> {
         redraws::count(redraws::Event::ViewWindow);
         let popup = card(popup::view(
+            &self.core.applet,
             Some(&self.stats),
             &self.settings,
             &self.models,

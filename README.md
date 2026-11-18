@@ -9,12 +9,17 @@ the Omarchy plugin [navjottomer.sysmon][omarchy-sysmon] (design only; no code is
 
 ## Features
 
-- **Panel button:** one or two rows (CPU, RAM, GPU, Disk or CPU °C) with download and upload rates, in the
-  Stacked, One line or Compact layout. Vertical panels use Compact.
-- **Warnings:** a row turns red when its value crosses a limit. Each warning has its own limit and switch:
+- **Panel button:** two rows of up to four items each, built in the popup's settings: CPU usage and
+  temperature, RAM, swap, a GPU's usage, temperature or VRAM (the first awake GPU, or one you pick), a
+  filesystem's usage, disk read and write rates (all disks or one), an NVMe drive's temperature, and
+  download and upload rates (all interfaces or one). The rows sit one above the other (Stacked) or on one
+  line. On a vertical panel the items stand in one column, or in two for Stacked where they fit. By
+  default: CPU and download over RAM and upload.
+- **Warnings:** an item turns red when its own value crosses a limit. Each warning has its own limit and switch:
   CPU and GPU temperature (85 °C), memory and any filesystem (90 %), swap (50 %, off) and VRAM (90 %,
-  off), and NVMe temperature (each drive's rated limit, or one of your own). A problem that isn't on the
-  panel button, such as a full filesystem or a hot NVMe drive, turns the whole button red. The tooltip
+  off), and NVMe temperature (each drive's rated limit, or one of your own). A problem no item on the
+  panel button owns, such as a full filesystem or a hot NVMe drive that isn't shown, turns the whole
+  button red. The tooltip
   lists what's wrong.
 - **Popup:** total and per-core CPU load, uptime, load average and temperature; memory and swap; every GPU
   with load, temperature, power and VRAM; each network interface; disk throughput, every mounted
@@ -22,7 +27,8 @@ the Omarchy plugin [navjottomer.sysmon][omarchy-sysmon] (design only; no code is
   2-minute graphs.
 - **Popup layout:** one column or two (CPU, memory and GPU beside network, disk and processes). Auto, the
   default, takes two columns when one wouldn't fit the screen's height without scrolling.
-- **Settings page** in the popup. Changes apply at once and are kept.
+- **Settings page** in the popup, with a builder for the panel button: a live preview, the layout, and the
+  rows as chips to move, remove, retarget or add to. Changes apply at once and are kept.
 - **Right click** on the panel button, or **Process monitor** in the popup, opens COSMIC's System Monitor,
   or the app you choose in the settings: a desktop ID (`io.missioncenter.MissionCenter`) or a command
   (`kitty -e btop`).
@@ -32,7 +38,7 @@ the Omarchy plugin [navjottomer.sysmon][omarchy-sysmon] (design only; no code is
 - A sampler thread reads `/proc` and `/sys` through files it keeps open, every 2 s (4 s on battery while
   the popup is closed). Processes are only scanned while the popup is open.
 - While the popup is closed, the panel button is redrawn only when a shown value moves enough (2 points,
-  1 °C, or 1.5× for a network rate), when a warning changes, or after 30 s.
+  1 °C, or 1.5× for a rate), when a warning changes, or after 30 s.
 - **A suspended GPU is never woken.** The applet reads only a card's `power/runtime_status` until it is
   awake. NVIDIA stats come from NVML, which is started and shut down per sample, only while the card is
   already awake, and only once every 15 s after the card has gone idle, so it can suspend again
