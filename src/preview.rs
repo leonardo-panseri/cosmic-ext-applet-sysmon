@@ -388,6 +388,8 @@ pub fn fixture() -> Stats {
     ];
     let history = Histories {
         cpu: wave(38.0, 14.0, 0.0),
+        memory: wave(39.0, 4.0, 0.7),
+        swap: wave(6.0, 3.0, 2.4),
         gpus: vec![
             ("card0".into(), idle()),
             ("card1".into(), wave(30.0, 18.0, 1.3)),
@@ -442,6 +444,9 @@ pub fn fixture() -> Stats {
         mounts: mounts(),
         processes: Some(processes()),
         history,
+        disks: Vec::new(),
+        other_mounts: Vec::new(),
+        extremes: crate::sampler::stats::Extremes::default(),
     }
 }
 

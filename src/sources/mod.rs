@@ -9,6 +9,7 @@
 //!
 //! Bounds (D8) live here too: [`clip_name`] and the `MAX_*` limits.
 
+pub mod block;
 pub mod discover;
 pub mod diskstats;
 pub mod drm;
