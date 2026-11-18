@@ -359,7 +359,7 @@ fn processes(stats: &Stats) -> Element<'_, Message> {
         Some(top) => widget::Row::new()
             .spacing(cosmic::theme::spacing().space_m)
             .push(process_column(fl!("processes-cpu"), &top.by_cpu, |p| {
-                format!("{:.0}%", p.cpu.max(0.0))
+                format::fine_percent(p.cpu)
             }))
             .push(process_column(
                 fl!("processes-memory"),

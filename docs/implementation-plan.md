@@ -143,7 +143,7 @@ Same three layouts as the reference:
 - **Stacked** (default): two small rows in one panel slot. Each row is an icon and a value (CPU, RAM, GPU, Disk, CPU °C),
   with ↓/↑ network rates beside them if enabled.
 - **One line:** both values and the rates on one line.
-- **Compact:** only the top value.
+- **Compact:** only the top row, its icon beside the value (above it on a vertical panel).
 
 On a vertical panel, Stacked and One line become Compact. **Warnings:** a row turns the theme's destructive
 colour when its own value crosses a limit. If the problem is something not shown on the panel button, the whole button

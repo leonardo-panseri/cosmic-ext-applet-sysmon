@@ -87,8 +87,9 @@ pub struct TopProcesses {
 pub struct Process {
     pub pid: u32,
     pub name: String,
-    /// CPU use since the previous scan, in percent of one core, as `top` shows it: a process
-    /// keeping two cores busy is at 200 %.
+    /// CPU use since the previous scan, in percent of the whole CPU, as GNOME's and COSMIC's
+    /// system monitors show it: 100 % is every core busy, and a process keeping two of 16 threads
+    /// busy is at 12.5 % (`top` would show 200 %).
     pub cpu: f32,
     /// Resident memory, bytes.
     pub rss: u64,

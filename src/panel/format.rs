@@ -16,6 +16,23 @@ pub fn percent(value: f32) -> String {
     format!("{:.0}%", value.clamp(0.0, 100.0))
 }
 
+/// A small share in percent, such as one process's part of the whole CPU: one decimal below 10,
+/// whole numbers from there, clamped to 0–100: `"0.4%"`, `"9.8%"`, `"38%"`.
+#[must_use]
+pub fn fine_percent(value: f32) -> String {
+    let value = if value.is_finite() {
+        value.clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    // Switch where rounding would show "10.0%".
+    if value < 9.95 {
+        format!("{value:.1}%")
+    } else {
+        format!("{value:.0}%")
+    }
+}
+
 /// A temperature, rounded to a whole degree: `"52°C"`.
 #[must_use]
 pub fn celsius(value: f32) -> String {
@@ -86,6 +103,18 @@ mod tests {
         assert_eq!(percent(100.0), "100%");
         assert_eq!(percent(104.0), "100%");
         assert_eq!(percent(-3.0), "0%");
+    }
+
+    #[test]
+    fn fine_percent_keeps_one_decimal_below_ten() {
+        assert_eq!(fine_percent(0.0), "0.0%");
+        assert_eq!(fine_percent(0.44), "0.4%");
+        assert_eq!(fine_percent(9.94), "9.9%");
+        assert_eq!(fine_percent(9.96), "10%");
+        assert_eq!(fine_percent(38.2), "38%");
+        assert_eq!(fine_percent(250.0), "100%");
+        assert_eq!(fine_percent(-1.0), "0.0%");
+        assert_eq!(fine_percent(f32::NAN), "0.0%");
     }
 
     #[test]
