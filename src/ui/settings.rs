@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! The popup's settings page (plan §2.3): the panel button's layout and rows, the network rates,
-//! the process monitor and the warning limits. Every change applies at once; the app stores it
+//! the process monitor, the popup's columns and the warning limits. Every change applies at once; the app stores it
 //! and tells the sampler. Typed text is a draft until Enter or leaving the field: then it is
 //! saved if valid, else dropped, and the field shows the setting again.
 
@@ -12,12 +12,14 @@ use cosmic::prelude::*;
 use cosmic::widget::segmented_button::{self, Entity, SingleSelectModel, StyleSheet};
 use cosmic::widget::{self, icon, segmented_control, settings};
 
+use super::columns::Columns;
 use super::popup::{self, Page};
 use crate::app::Message;
 use crate::fl;
 use crate::launch::Launcher;
 use crate::panel::{
-    DEFAULT_PROCESS_MONITOR, Layout, LimitKind, NVME_STEP_FROM, PanelSettings, RowKind, Unit,
+    DEFAULT_PROCESS_MONITOR, Layout, LimitKind, NVME_STEP_FROM, PanelSettings, PopupLayout,
+    RowKind, Unit,
 };
 
 /// A text field of the settings page.
@@ -36,6 +38,8 @@ pub enum SettingChange {
     Top(Entity),
     /// A segment of the bottom row's choice.
     Bottom(Entity),
+    /// A segment of the popup's columns.
+    PopupLayout(Entity),
     Network(bool),
     /// A warning turned on or off.
     WarnOn(LimitKind, bool),
@@ -60,6 +64,7 @@ pub struct SettingsModels {
     layout: SingleSelectModel,
     top: SingleSelectModel,
     bottom: SingleSelectModel,
+    popup_layout: SingleSelectModel,
     drafts: HashMap<Field, String>,
 }
 
@@ -71,6 +76,7 @@ impl SettingsModels {
             layout: model(&Layout::ALL, layout_label),
             top: model(&RowKind::ALL, row_label),
             bottom: model(&RowKind::ALL, row_label),
+            popup_layout: model(&PopupLayout::ALL, popup_layout_label),
             drafts: HashMap::new(),
         };
         models.select(settings);
@@ -82,6 +88,7 @@ impl SettingsModels {
         select(&mut self.layout, &settings.layout);
         select(&mut self.top, &settings.top);
         select(&mut self.bottom, &settings.bottom);
+        select(&mut self.popup_layout, &settings.popup_layout);
     }
 
     /// What `field` shows: its draft, or `settings`' value.
@@ -116,6 +123,10 @@ impl SettingsModels {
             }
             SettingChange::Bottom(item) => {
                 settings.bottom = value(&self.bottom, item).unwrap_or(settings.bottom);
+            }
+            SettingChange::PopupLayout(item) => {
+                settings.popup_layout =
+                    value(&self.popup_layout, item).unwrap_or(settings.popup_layout);
             }
             SettingChange::Network(network) => settings.network = network,
             SettingChange::WarnOn(kind, on) => match settings.limit_mut(kind) {
@@ -256,6 +267,14 @@ fn row_label(kind: RowKind) -> String {
     }
 }
 
+fn popup_layout_label(layout: PopupLayout) -> String {
+    match layout {
+        PopupLayout::Auto => fl!("popup-layout-auto"),
+        PopupLayout::OneColumn => fl!("popup-layout-one-column"),
+        PopupLayout::TwoColumns => fl!("popup-layout-two-columns"),
+    }
+}
+
 fn limit_label(kind: LimitKind) -> String {
     match kind {
         LimitKind::CpuTemp => fl!("setting-warn-cpu-temp"),
@@ -275,9 +294,15 @@ fn control_without_check(theme: &cosmic::Theme) -> segmented_button::Appearance 
     theme.horizontal(&cosmic::theme::SegmentedButton::Control)
 }
 
-/// The settings page: the panel button's choices, the network rates, the process monitor and the
-/// warning limits, scrolling above a way back to the stats page.
-pub fn view<'a>(models: &'a SettingsModels, settings: &PanelSettings) -> Element<'a, Message> {
+/// The settings page: the panel button's choices, the network rates, the process monitor, the
+/// popup's columns and the warning limits, scrolling beyond `max_height` above a way back to the
+/// stats page. In two columns the warnings go in the second.
+pub fn view<'a>(
+    models: &'a SettingsModels,
+    settings: &PanelSettings,
+    columns: Columns,
+    max_height: f32,
+) -> Element<'a, Message> {
     let spacing = cosmic::theme::spacing();
     let choice =
         |title: String, model: &'a SingleSelectModel, change: fn(Entity) -> SettingChange| {
@@ -307,38 +332,56 @@ pub fn view<'a>(models: &'a SettingsModels, settings: &PanelSettings) -> Element
         .into_iter()
         .map(|kind| limit_item(models, settings, kind))
         .collect();
-    let page = widget::Column::new()
-        .spacing(spacing.space_s)
-        .push(choice(
-            fl!("setting-layout"),
-            &models.layout,
-            SettingChange::Layout,
-        ))
-        .push(choice(
-            fl!("setting-top-row"),
-            &models.top,
-            SettingChange::Top,
-        ))
-        .push(choice(
+    let panel_button = vec![
+        choice(fl!("setting-layout"), &models.layout, SettingChange::Layout),
+        choice(fl!("setting-top-row"), &models.top, SettingChange::Top),
+        choice(
             fl!("setting-bottom-row"),
             &models.bottom,
             SettingChange::Bottom,
-        ))
-        .push(widget::divider::horizontal::default())
-        .push(network)
-        .push(widget::divider::horizontal::default())
-        .push(process_monitor(models, settings))
-        .push(widget::divider::horizontal::default())
-        .push(popup::section(fl!("setting-warn"), limits))
-        // As on the stats page, the scroll bar runs in the popup's side padding.
-        .padding([0, spacing.space_s]);
+        ),
+        widget::divider::horizontal::default().into(),
+        network.into(),
+        widget::divider::horizontal::default().into(),
+        process_monitor(models, settings),
+    ];
+    let popup_and_warnings = vec![
+        choice(
+            fl!("setting-popup-layout"),
+            &models.popup_layout,
+            SettingChange::PopupLayout,
+        ),
+        widget::divider::horizontal::default().into(),
+        popup::section(fl!("setting-warn"), limits),
+    ];
+    let column = |parts: Vec<Element<'a, Message>>| {
+        widget::Column::new()
+            .spacing(spacing.space_s)
+            .extend(parts)
+            .width(Length::Fill)
+    };
+    let page: Element<'a, Message> = match columns {
+        Columns::One => column(panel_button)
+            .push(widget::divider::horizontal::default())
+            .extend(popup_and_warnings)
+            .into(),
+        Columns::Two => popup::side_by_side(
+            column(panel_button).into(),
+            column(popup_and_warnings).into(),
+        ),
+    };
+    // As on the stats page, the scroll bar runs in the popup's side padding.
+    let page = widget::container(page).padding([0, spacing.space_s]);
     let padded =
         |content: Element<'a, Message>| widget::container(content).padding([0, spacing.space_s]);
     widget::Column::new()
         .spacing(spacing.space_s)
         .align_x(Alignment::Start)
         .push(padded(widget::text::title4(fl!("settings")).into()))
-        .push(widget::container(widget::scrollable(page)).max_height(popup::PAGE_MAX_HEIGHT))
+        .push(
+            widget::container(widget::scrollable(page))
+                .max_height((max_height - TITLE_HEIGHT).max(0.0)),
+        )
         .push(padded(popup::footer_button(
             "go-previous-symbolic",
             fl!("back"),
@@ -346,6 +389,9 @@ pub fn view<'a>(models: &'a SettingsModels, settings: &PanelSettings) -> Element
         )))
         .into()
 }
+
+/// The page's title with the space under it, which the stats page doesn't have.
+const TITLE_HEIGHT: f32 = 47.0;
 
 /// The process monitor's field, under its title and hint, with a reset to the default.
 fn process_monitor<'a>(models: &SettingsModels, settings: &PanelSettings) -> Element<'a, Message> {
@@ -482,6 +528,7 @@ mod tests {
         let settings = PanelSettings {
             layout: Layout::Compact,
             bottom: RowKind::Disk,
+            popup_layout: PopupLayout::OneColumn,
             ..PanelSettings::default()
         };
         let models = SettingsModels::new(&settings);
@@ -493,6 +540,10 @@ mod tests {
         assert_eq!(
             value(&models.bottom, models.bottom.active()),
             Some(RowKind::Disk)
+        );
+        assert_eq!(
+            value(&models.popup_layout, models.popup_layout.active()),
+            Some(PopupLayout::OneColumn)
         );
     }
 
@@ -511,6 +562,8 @@ mod tests {
         let temp = entity(&models.bottom, &RowKind::CpuTemp);
         let settings = models.changed(SettingChange::Bottom(temp), &settings);
         let settings = models.changed(SettingChange::Network(false), &settings);
+        let two = entity(&models.popup_layout, &PopupLayout::TwoColumns);
+        let settings = models.changed(SettingChange::PopupLayout(two), &settings);
         let settings = models.changed(SettingChange::WarnAt(LimitKind::CpuTemp, 70), &settings);
         let settings = models.changed(SettingChange::WarnOn(LimitKind::Swap, true), &settings);
         let settings = models.changed(SettingChange::WarnOn(LimitKind::Nvme, false), &settings);
@@ -522,6 +575,7 @@ mod tests {
                 top: RowKind::Gpu,
                 bottom: RowKind::CpuTemp,
                 network: false,
+                popup_layout: PopupLayout::TwoColumns,
                 warn_cpu_temp: Limit::on(70),
                 warn_swap: Limit::on(50),
                 warn_nvme: NvmeLimit {

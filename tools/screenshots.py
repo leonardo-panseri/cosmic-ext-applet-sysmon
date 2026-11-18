@@ -31,14 +31,13 @@ TIMEOUT = 60
 # each side.
 BORDER = 1
 
-# name -> the preview's environment. SYSMON_PREVIEW_HEIGHT fits the window to the popup.
+# name -> the preview's environment. SYSMON_PREVIEW_HEIGHT stands for the screen's height, which
+# the Auto popup layout measures: too short for one column, so these show two.
 SHOTS = {
-    # The popup as the panel shows it: the stats page scrolls above the footer.
-    "popup": {"SYSMON_PREVIEW_HEIGHT": "860"},
-    # The whole stats page at once, cut in two halves side by side.
-    "popup-full": {"SYSMON_PREVIEW_FULL": "1", "SYSMON_PREVIEW_HEIGHT": "860"},
-    # The settings page.
-    "settings": {"SYSMON_PREVIEW_SETTINGS": "1", "SYSMON_PREVIEW_HEIGHT": "900"},
+    # The popup as the panel shows it, in two columns: every section without scrolling.
+    "popup": {"SYSMON_PREVIEW_HEIGHT": "920"},
+    # The settings page, in the same two-column popup.
+    "settings": {"SYSMON_PREVIEW_SETTINGS": "1", "SYSMON_PREVIEW_HEIGHT": "620"},
 }
 
 

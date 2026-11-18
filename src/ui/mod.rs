@@ -2,6 +2,7 @@
 
 //! Widgets (plan §3.1): the panel button, the popup's pages, the graph canvas and their icons.
 
+pub mod columns;
 pub mod graph;
 pub mod icons;
 pub mod panel_button;

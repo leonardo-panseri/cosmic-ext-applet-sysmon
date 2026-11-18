@@ -73,6 +73,11 @@ setting-network-description = Download and upload
 setting-process-monitor = Process monitor
 setting-process-monitor-hint = Desktop ID or command
 setting-process-monitor-reset = Reset to default
+setting-popup-layout = POPUP LAYOUT
+# Auto: two columns when one would need scrolling.
+popup-layout-auto = Auto
+popup-layout-one-column = One column
+popup-layout-two-columns = Two columns
 # The warnings, each with its limit and a switch.
 setting-warn-cpu-temp = CPU temperature
 setting-warn-gpu-temp = GPU temperature

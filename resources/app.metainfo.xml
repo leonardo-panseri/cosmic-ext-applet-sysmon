@@ -29,15 +29,11 @@
   <screenshots>
     <screenshot type="default">
       <image>https://raw.githubusercontent.com/leonardo-panseri/cosmic-ext-applet-sysmon/main/resources/screenshots/popup.png</image>
-      <caption>The panel button and the popup</caption>
-    </screenshot>
-    <screenshot>
-      <image>https://raw.githubusercontent.com/leonardo-panseri/cosmic-ext-applet-sysmon/main/resources/screenshots/popup-full.png</image>
-      <caption>Every section of the popup: CPU, memory, GPUs, network, disks and processes</caption>
+      <caption>The panel button and the popup in two columns: CPU, memory, GPUs, network, disks and processes</caption>
     </screenshot>
     <screenshot>
       <image>https://raw.githubusercontent.com/leonardo-panseri/cosmic-ext-applet-sysmon/main/resources/screenshots/settings.png</image>
-      <caption>Choosing what the panel button shows and when it warns</caption>
+      <caption>Choosing what the panel button shows, the popup's layout and when it warns</caption>
     </screenshot>
   </screenshots>
   <launchable type="desktop-id">io.github.leonardo_panseri.cosmic-ext-applet-sysmon.desktop</launchable>

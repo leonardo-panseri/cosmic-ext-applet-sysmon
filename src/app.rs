@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 
+use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
+use cosmic::iced::event::{PlatformSpecific, wayland};
 use cosmic::iced::futures::{SinkExt, Stream, StreamExt};
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
 use cosmic::iced::window::Id;
@@ -11,9 +13,11 @@ use cosmic::iced::{Limits, Subscription};
 use cosmic::prelude::*;
 use cosmic::widget;
 
-use crate::panel::{PanelSettings, PanelSummary};
+use crate::outputs::Outputs;
+use crate::panel::{PanelSettings, PanelSummary, PopupLayout};
 use crate::sampler::stats::Stats;
 use crate::sampler::{self, Control, SamplerHandle, Update};
+use crate::ui::columns::{self, Columns, Room};
 use crate::ui::panel_button::{self, panel_button};
 use crate::ui::popup::{self, Page};
 use crate::ui::settings::{SettingChange, SettingsModels};
@@ -44,6 +48,13 @@ pub struct AppModel {
     stats: Option<Arc<Stats>>,
     /// When the last sample arrived, for the `SYSMON_DEBUG` redraw counts.
     last_sample: Option<std::time::Instant>,
+    /// The outputs' sizes, to find the room the popup has on the panel's.
+    outputs: Outputs<WlOutput>,
+    /// The room the popup has on its output; `None` until the output is known.
+    room: Option<Room>,
+    /// The stats page's columns, chosen when the popup opens, the settings or the output change,
+    /// or a sample arrives while it is open; never per frame (D6).
+    columns: Columns,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +77,8 @@ pub enum Message {
     ConfigChanged(PanelSettings),
     /// The panel button's tooltip opens or closes its surface.
     Surface(cosmic::surface::Action<Message>),
+    /// An output appeared, changed (resolution, scale, rotation) or went away.
+    Output(wayland::OutputEvent, WlOutput),
 }
 
 impl AppModel {
@@ -120,7 +133,43 @@ impl AppModel {
         if let Some(sampler) = &self.sampler {
             sampler.send(Control::Settings(settings.clone()));
         }
+        let new_layout = settings.popup_layout != self.settings.popup_layout;
         self.settings = settings;
+        if new_layout {
+            // An open popup resizes to the new layout at once.
+            self.choose_columns(false);
+        }
+    }
+
+    /// Chooses the stats page's columns for the room on the panel's output. With `keep_two`,
+    /// while the popup is open, `Auto` doesn't go back to one column, so the popup doesn't
+    /// shrink and grow as a device comes and goes.
+    fn choose_columns(&mut self, keep_two: bool) {
+        let applet = &self.core.applet;
+        let horizontal = applet.is_horizontal();
+        self.room = self.outputs.size(&applet.output_name).map(|output| {
+            let (width, height) = applet.suggested_window_size();
+            let panel = if horizontal { height } else { width };
+            #[expect(clippy::cast_precision_loss, reason = "a panel's thickness")]
+            Room::on_output(output, panel.get() as f32, horizontal)
+        });
+        let height = match self.stats.as_deref() {
+            Some(stats) => columns::one_column_height(stats),
+            None => columns::one_column_height(&Stats::default()),
+        };
+        let chosen = columns::choose(self.settings.popup_layout, height, self.room, horizontal);
+        let keep = keep_two
+            && self.settings.popup_layout == PopupLayout::Auto
+            && self.columns == Columns::Two;
+        if !keep && chosen != self.columns {
+            if crate::probe_client::debug() {
+                eprintln!(
+                    "popup: {chosen:?} (one column {height:.0} px, room {:?})",
+                    self.room
+                );
+            }
+            self.columns = chosen;
+        }
     }
 }
 
@@ -159,6 +208,9 @@ impl cosmic::Application for AppModel {
             panel: None,
             stats: None,
             last_sample: None,
+            outputs: Outputs::default(),
+            room: None,
+            columns: Columns::One,
         };
         (app, Task::none())
     }
@@ -172,7 +224,7 @@ impl cosmic::Application for AppModel {
             .core
             .watch_config::<PanelSettings>(Self::APP_ID)
             .map(|update| Message::ConfigChanged(update.config));
-        Subscription::batch([Subscription::run(sampler_messages), config])
+        Subscription::batch([Subscription::run(sampler_messages), config, output_events()])
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
@@ -200,9 +252,23 @@ impl cosmic::Application for AppModel {
             &self.settings,
             &self.models,
             self.page,
-            popup::PAGE_MAX_HEIGHT,
+            self.columns,
+            columns::page_max_height(self.room),
         );
-        self.core.applet.popup_container(content).into()
+        // The popup takes the size its content lays out to, within these limits: as wide as
+        // its columns, and as high as the room on its output allows.
+        let width = self.columns.width();
+        self.core
+            .applet
+            .popup_container(content)
+            .limits(
+                Limits::NONE
+                    .min_width(width)
+                    .max_width(width)
+                    .min_height(1.0)
+                    .max_height(columns::popup_max_height(self.room)),
+            )
+            .into()
     }
 
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
@@ -220,15 +286,19 @@ impl cosmic::Application for AppModel {
                 self.popup = Some(new_id);
                 self.page = Page::Stats;
                 self.popup_changed();
+                self.choose_columns(false);
+                // libcosmic's positioner lets the compositor slide the popup along the panel
+                // and flip it (`constraint_adjustment` 15), so a wide popup near the panel's
+                // end stays on screen; it repositions again when the popup resizes.
                 let mut popup_settings = self
                     .core
                     .applet
                     .get_popup_settings(main, new_id, None, None, None);
                 popup_settings.positioner.size_limits = Limits::NONE
-                    .max_width(372.0)
-                    .min_width(300.0)
+                    .min_width(Columns::One.width())
+                    .max_width(Columns::Two.width())
                     .min_height(60.0)
-                    .max_height(1080.0);
+                    .max_height(columns::popup_max_height(self.room));
                 return get_popup(popup_settings);
             }
             Message::OpenProcessMonitor => {
@@ -261,6 +331,9 @@ impl cosmic::Application for AppModel {
                 redraws::log_on_sample(&mut self.last_sample);
                 self.panel = Some(update.panel);
                 self.stats = Some(update.stats);
+                if self.popup.is_some() {
+                    self.choose_columns(true);
+                }
             }
             Message::Setting(change) => self.change_setting(change),
             Message::ConfigChanged(settings) => {
@@ -277,12 +350,44 @@ impl cosmic::Application for AppModel {
             Message::Surface(action) => {
                 return cosmic::task::message(cosmic::Action::Surface(action));
             }
+            Message::Output(event, output) => {
+                track_output(&mut self.outputs, event, output);
+                self.choose_columns(self.popup.is_some());
+            }
         }
         Task::none()
     }
 
     fn style(&self) -> Option<cosmic::iced::theme::Style> {
         Some(cosmic::applet::style())
+    }
+}
+
+/// The Wayland output events, which iced sends to every subscription and to no window.
+pub(crate) fn output_events() -> Subscription<Message> {
+    cosmic::iced::event::listen_with(|event, _, _| match event {
+        cosmic::iced::Event::PlatformSpecific(PlatformSpecific::Wayland(
+            wayland::Event::Output(event, output),
+        )) => Some(Message::Output(event, output)),
+        _ => None,
+    })
+}
+
+/// Records an output event in `outputs`.
+pub(crate) fn track_output(
+    outputs: &mut Outputs<WlOutput>,
+    event: wayland::OutputEvent,
+    output: WlOutput,
+) {
+    if crate::probe_client::debug() {
+        eprintln!("output: {event:?}");
+    }
+    match event {
+        wayland::OutputEvent::Created(Some(info)) | wayland::OutputEvent::InfoUpdate(info) => {
+            outputs.update(output, info.name, info.logical_size);
+        }
+        wayland::OutputEvent::Created(None) => {}
+        wayland::OutputEvent::Removed => outputs.remove(&output),
     }
 }
 

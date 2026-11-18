@@ -33,6 +33,21 @@ impl Layout {
     pub const ALL: [Self; 3] = [Self::Stacked, Self::OneLine, Self::Compact];
 }
 
+/// How many columns the popup's stats page takes (§2.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PopupLayout {
+    /// Two columns when one would need scrolling on this screen.
+    Auto,
+    OneColumn,
+    /// CPU, memory and GPU beside network, disk and processes.
+    TwoColumns,
+}
+
+impl PopupLayout {
+    /// Every popup layout, in the settings page's order.
+    pub const ALL: [Self; 3] = [Self::Auto, Self::OneColumn, Self::TwoColumns];
+}
+
 /// What a panel row shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RowKind {
@@ -100,6 +115,8 @@ pub struct PanelSettings {
     /// What right click and the popup's **Process monitor** button open: a desktop id or a
     /// command line ([`crate::launch`]).
     pub process_monitor: String,
+    /// The popup's columns. Not a panel button setting, but stored with them.
+    pub popup_layout: PopupLayout,
 }
 
 impl Default for PanelSettings {
@@ -117,6 +134,7 @@ impl Default for PanelSettings {
             warn_vram: Limit::off(90),
             warn_nvme: NvmeLimit::default(),
             process_monitor: DEFAULT_PROCESS_MONITOR.to_owned(),
+            popup_layout: PopupLayout::Auto,
         }
     }
 }

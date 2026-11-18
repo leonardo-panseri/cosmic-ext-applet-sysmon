@@ -164,7 +164,15 @@ No CPU load warning: a busy CPU is normal and transient, and its temperature alr
 
 ### 2.2 Popup (stats page)
 
-Sections in the reference's order, inside a scrollable area (COSMIC popups have a maximum height):
+Sections in the reference's order, inside a scrollable area that takes the height the panel's output leaves the
+popup (680 px until the output is known), in one column or two: sections 1–3 beside 4–6, a vertical divider
+between them, the footer under both. The setting `popup_layout` chooses: **Auto** (the default) takes two columns
+when the one-column popup, estimated from the sample's devices, is taller than that room and two columns fit across
+it. The applet learns its output's logical size from the Wayland output events iced forwards to subscriptions,
+matched by the name the panel passes in `COSMIC_PANEL_OUTPUT`; until it is known, Auto takes two columns on a
+horizontal panel and one on a vertical panel. The choice is cached (D6): made when the popup opens, the setting
+or the output changes, or a sample arrives while the popup is open, and while it is open Auto never drops back to
+one column. The popup resizes in place; the compositor slides it along the panel to keep it on screen.
 
 1. **CPU header:** big total %, uptime, thread count, load average, package temp; 2-min graph;
    per-core bars (red above 85 %).
@@ -194,13 +202,18 @@ Inside the popup, like the reference and like codexbar's panel page:
 - Top row and bottom row: CPU / RAM / GPU / Disk / CPU °C
 - Network speed: toggle
 - Process monitor: a desktop ID or command (D5), with a reset to the default
+- Popup layout: Auto / One column / Two columns (§2.2)
 - Warn at or above: each warning of §2.1 with a switch and its limit, typed or set with − and +
 - Back
 
+In two columns the page splits too: the panel button's choices, network and process monitor beside the popup
+layout and the warnings.
+
 Changes save immediately to cosmic-config and the panel updates live; a typed value on Enter or leaving the field,
 and only if valid (else the field shows the setting again). Defaults: `stacked`, top `cpu`, bottom `memory`, network
-on, the limits of §2.1. The old single `warn_temp` and `warn_usage` keys, if stored, are the defaults of the
-CPU/GPU temperature and memory/disk limits until those are stored themselves; the config version stays 1.
+on, popup layout `Auto`, the limits of §2.1. The old single `warn_temp` and `warn_usage` keys, if stored, are the
+defaults of the CPU/GPU temperature and memory/disk limits until those are stored themselves; the config version
+stays 1, as it does for the added `popup_layout` key.
 
 ---
 

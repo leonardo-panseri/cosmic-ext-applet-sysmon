@@ -4,6 +4,7 @@ mod app;
 mod config;
 mod i18n;
 mod launch;
+mod outputs;
 mod panel;
 #[cfg(debug_assertions)]
 mod preview;

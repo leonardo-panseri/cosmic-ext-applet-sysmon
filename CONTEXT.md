@@ -15,6 +15,10 @@ _Avoid_: bar, widget, indicator
 The window opened from the panel button. It has a **stats page** and a **settings page**.
 _Avoid_: menu, dropdown, panel
 
+**Popup layout**:
+One column or two; **Auto** takes two when one would need scrolling on the panel's screen.
+_Avoid_: mode, view, wide popup
+
 **Warning**:
 A value at or above its limit. It colours its own row, or the whole panel button when the value isn't shown there.
 _Avoid_: alert, alarm

@@ -179,6 +179,7 @@ pub fn store(handler: &cosmic_config::Config, stored: &mut PanelSettings, new: &
         stored.set_warn_vram(handler, new.warn_vram),
         stored.set_warn_nvme(handler, new.warn_nvme),
         stored.set_process_monitor(handler, new.process_monitor.clone()),
+        stored.set_popup_layout(handler, new.popup_layout),
     ];
     for why in results.into_iter().filter_map(Result::err) {
         eprintln!("can't store a setting: {why}");
@@ -195,7 +196,7 @@ pub fn log(what: &str, settings: &PanelSettings) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panel::{Layout, Limit, NvmeLimit, RowKind};
+    use crate::panel::{Layout, Limit, NvmeLimit, PopupLayout, RowKind};
 
     const APP_ID: &str = "io.github.example.sysmon-test";
 
@@ -231,6 +232,7 @@ mod tests {
                 at: Some(70),
             },
             process_monitor: "kitty -e btop".into(),
+            popup_layout: PopupLayout::TwoColumns,
         };
         store(&handler, &mut stored, &changed);
         assert_eq!(stored, changed);
@@ -250,12 +252,17 @@ mod tests {
             "warn_vram",
             "warn_nvme",
             "process_monitor",
+            "popup_layout",
         ] {
             assert!(folder.join(key).is_file(), "{key}");
         }
         assert_eq!(
             std::fs::read_to_string(folder.join("layout")).unwrap(),
             "OneLine"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join("popup_layout")).unwrap(),
+            "TwoColumns"
         );
 
         assert_eq!(read(&open(&dir)), changed);
@@ -400,6 +407,7 @@ mod tests {
         std::fs::write(folder.join("warn_vram"), "(on: true)").unwrap();
         std::fs::write(folder.join("warn_nvme"), "(on: true, at: Some(72))").unwrap();
         std::fs::write(folder.join("top"), "Fan").unwrap();
+        std::fs::write(folder.join("popup_layout"), "Wide").unwrap();
         let settings = read(&open(&dir));
         assert_eq!(settings.layout, Layout::Compact);
         // Out of the page's range: clamped. Not a `Limit`: the default.
@@ -409,5 +417,6 @@ mod tests {
         assert_eq!(settings.warn_vram, PanelSettings::default().warn_vram);
         assert_eq!(settings.warn_nvme.at, Some(72));
         assert_eq!(settings.top, RowKind::Cpu);
+        assert_eq!(settings.popup_layout, PopupLayout::Auto);
     }
 }

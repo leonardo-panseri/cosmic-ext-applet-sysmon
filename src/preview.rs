@@ -9,9 +9,10 @@
 //!
 //! `SYSMON_PREVIEW_SCREENSHOT=<file>` instead draws a mock top panel over a backdrop, in COSMIC's
 //! default dark theme, saves the window's pixels to `<file>` and exits. `SYSMON_PREVIEW_HEIGHT`
-//! sets the window's height in that mode, and `SYSMON_PREVIEW_FULL=1` shows the whole stats page
-//! at once, cut in two halves side by side, instead of scrolling it. `SYSMON_PREVIEW_SETTINGS=1`
-//! starts on the settings page. `SYSMON_PREVIEW_LAYOUT=stacked|one-line|compact` picks the panel
+//! sets the window's height in that mode, which stands for the output's: the popup's room is
+//! measured from it as on the panel. `SYSMON_PREVIEW_COLUMNS=1|2|auto` (default `auto`) sets the
+//! popup's layout; outside screenshot mode `auto` measures the real output, from the same output
+//! events as the applet. `SYSMON_PREVIEW_SETTINGS=1` starts on the settings page. `SYSMON_PREVIEW_LAYOUT=stacked|one-line|compact` picks the panel
 //! button's layout, and `COSMIC_PANEL_SIZE` (`XS`…`XL`) and `COSMIC_PANEL_ANCHOR` (`Left` for a
 //! vertical panel) its panel, as libcosmic reads them. The file is `RGBA`, the width and height as
 //! little-endian `u32`s, then the pixels; `tools/screenshots.py` turns it into a PNG.
@@ -33,7 +34,8 @@ use cosmic::prelude::*;
 use cosmic::widget;
 
 use crate::app::{self, Message};
-use crate::panel::{Layout, PanelSettings, PanelSummary};
+use crate::outputs::Outputs;
+use crate::panel::{Layout, PanelSettings, PanelSummary, PopupLayout};
 use crate::sampler::history::{HISTORY_LEN, History};
 use crate::sampler::rates::PairRate;
 use crate::sampler::stats::{
@@ -43,16 +45,19 @@ use crate::sampler::stats::{
 use crate::sources::drm::RuntimeStatus;
 use crate::sources::loadavg::LoadAvg;
 use crate::sources::meminfo::MemInfo;
+use crate::ui::columns::{self, Columns, Room};
 use crate::ui::panel_button::panel_button;
 use crate::ui::popup::{self, Page};
 use crate::ui::settings::{SettingChange, SettingsModels};
 use crate::{redraws, sampler};
 use sysmon_proto::{Mount, Process, TopProcesses};
 
-/// As wide as the panel's popup at most.
-const WIDTH: f32 = 372.0;
-/// The screenshot's default size in logical pixels.
+/// The screenshot's default size in logical pixels; wider for two columns.
 const SHOT: Size = Size::new(640.0, 900.0);
+/// The space either side of the popup in a two-column screenshot.
+const SHOT_MARGIN: f32 = 40.0;
+/// The width of the output a screenshot stands for: room for two columns.
+const SHOT_OUTPUT_WIDTH: f32 = 1920.0;
 /// Time for the first frames and the icons to load before the screenshot.
 const SHOT_DELAY: Duration = Duration::from_millis(1500);
 /// The same, from the live sampler: two samples, so the rates are in.
@@ -61,15 +66,14 @@ const LIVE_SHOT_DELAY: Duration = Duration::from_secs(5);
 pub fn run() -> cosmic::iced::Result {
     let shot = std::env::var("SYSMON_PREVIEW_SCREENSHOT").ok();
     let settings = if shot.is_some() {
-        let height = std::env::var("SYSMON_PREVIEW_HEIGHT")
-            .ok()
-            .and_then(|height| height.parse().ok())
-            .unwrap_or(SHOT.height);
-        let width = if std::env::var_os("SYSMON_PREVIEW_FULL").is_some() {
-            2.0 * WIDTH + 80.0
-        } else {
-            SHOT.width
-        };
+        let height = shot_height();
+        let columns = columns::choose(
+            popup_layout(),
+            columns::one_column_height(&fixture()),
+            Some(shot_room(height)),
+            true,
+        );
+        let width = SHOT.width.max(columns.width() + 2.0 * SHOT_MARGIN);
         let size = Size::new(width, height);
         cosmic::app::Settings::default()
             .size(size)
@@ -78,9 +82,33 @@ pub fn run() -> cosmic::iced::Result {
             .resizable(None)
             .theme(cosmic::Theme::dark())
     } else {
-        cosmic::app::Settings::default().size(Size::new(WIDTH + 40.0, 1000.0))
+        cosmic::app::Settings::default().size(Size::new(Columns::Two.width() + 40.0, 1000.0))
     };
     cosmic::app::run::<Preview>(settings, shot)
+}
+
+/// The screenshot window's height, which stands for the output's.
+fn shot_height() -> f32 {
+    std::env::var("SYSMON_PREVIEW_HEIGHT")
+        .ok()
+        .and_then(|height| height.parse().ok())
+        .unwrap_or(SHOT.height)
+}
+
+/// The room in a screenshot `height` high, under the mock panel, as the applet measures it.
+fn shot_room(height: f32) -> Room {
+    let (_, panel) = cosmic::applet::Context::default().suggested_window_size();
+    #[expect(clippy::cast_precision_loss, reason = "a panel's thickness")]
+    Room::on_output((SHOT_OUTPUT_WIDTH, height), panel.get() as f32, true)
+}
+
+/// The popup's layout from `SYSMON_PREVIEW_COLUMNS`.
+fn popup_layout() -> PopupLayout {
+    match std::env::var("SYSMON_PREVIEW_COLUMNS").as_deref() {
+        Ok("1") => PopupLayout::OneColumn,
+        Ok("2") => PopupLayout::TwoColumns,
+        _ => PopupLayout::Auto,
+    }
 }
 
 struct Preview {
@@ -92,8 +120,11 @@ struct Preview {
     models: SettingsModels,
     summary: PanelSummary,
     page: Page,
-    /// The stats page grows instead of scrolling.
-    full: bool,
+    /// The outputs' sizes, outside screenshot mode.
+    outputs: Outputs<cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput>,
+    /// The popup's room: the window's in screenshot mode, else the output's once known.
+    room: Option<Room>,
+    columns: Columns,
     /// Fed by the real sampler (`SYSMON_PREVIEW_LIVE`).
     live: bool,
     /// The live sampler, once started.
@@ -109,6 +140,23 @@ impl Preview {
         self.models.select(&self.settings);
         let layout = self.settings.layout_for(self.core.applet.is_horizontal());
         self.summary = PanelSummary::new(&self.stats, &self.settings, layout);
+        self.choose_columns();
+    }
+
+    /// As the applet chooses them, from the room in the screenshot or on the output.
+    fn choose_columns(&mut self) {
+        let applet = &self.core.applet;
+        let horizontal = applet.is_horizontal();
+        if self.shot.is_none() {
+            self.room = self.outputs.size(&applet.output_name).map(|output| {
+                let (width, height) = applet.suggested_window_size();
+                let panel = if horizontal { height } else { width };
+                #[expect(clippy::cast_precision_loss, reason = "a panel's thickness")]
+                Room::on_output(output, panel.get() as f32, horizontal)
+            });
+        }
+        let height = columns::one_column_height(&self.stats);
+        self.columns = columns::choose(self.settings.popup_layout, height, self.room, horizontal);
     }
 }
 
@@ -147,6 +195,7 @@ impl cosmic::Application for Preview {
                 Ok("compact") => Layout::Compact,
                 _ => Layout::Stacked,
             },
+            popup_layout: popup_layout(),
             ..PanelSettings::default()
         };
         let summary = PanelSummary::new(
@@ -154,7 +203,8 @@ impl cosmic::Application for Preview {
             &settings,
             settings.layout_for(core.applet.is_horizontal()),
         );
-        let preview = Self {
+        let room = shot.as_ref().map(|_| shot_room(shot_height()));
+        let mut preview = Self {
             core,
             shot,
             stats,
@@ -166,19 +216,27 @@ impl cosmic::Application for Preview {
             } else {
                 Page::Stats
             },
-            full: std::env::var_os("SYSMON_PREVIEW_FULL").is_some(),
+            outputs: Outputs::default(),
+            room,
+            columns: Columns::One,
             live,
             sampler: None,
             last_sample: None,
         };
+        preview.choose_columns();
         (preview, task)
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        if self.live {
-            Subscription::run(app::sampler_messages)
+        let outputs = if self.shot.is_none() {
+            app::output_events()
         } else {
             Subscription::none()
+        };
+        if self.live {
+            Subscription::batch([Subscription::run(app::sampler_messages), outputs])
+        } else {
+            outputs
         }
     }
 
@@ -193,6 +251,10 @@ impl cosmic::Application for Preview {
                 redraws::log_on_sample(&mut self.last_sample);
                 self.summary = update.panel;
                 self.stats = update.stats;
+            }
+            Message::Output(event, output) => {
+                app::track_output(&mut self.outputs, event, output);
+                self.choose_columns();
             }
             Message::ShowPage(page) => {
                 self.change_setting(SettingChange::CommitAll);
@@ -210,23 +272,14 @@ impl cosmic::Application for Preview {
 
     fn view(&self) -> Element<'_, Message> {
         redraws::count(redraws::Event::ViewWindow);
-        let popup: Element<'_, Message> = if self.full && self.page == Page::Stats {
-            let [first, second] = popup::stats_page_halves(&self.stats, &self.settings, 3);
-            widget::Row::new()
-                .spacing(16)
-                .align_y(cosmic::iced::Alignment::Start)
-                .push(card(first))
-                .push(card(second))
-                .into()
-        } else {
-            card(popup::view(
-                Some(&self.stats),
-                &self.settings,
-                &self.models,
-                self.page,
-                popup::PAGE_MAX_HEIGHT,
-            ))
-        };
+        let popup = card(popup::view(
+            Some(&self.stats),
+            &self.settings,
+            &self.models,
+            self.page,
+            self.columns,
+            columns::page_max_height(self.room),
+        ));
         let button = panel_button(&self.core.applet, &self.settings, Some(&self.summary));
         let panel = widget::container(button)
             .padding([2, 12])
@@ -258,6 +311,7 @@ impl cosmic::Application for Preview {
                 ..widget::container::Style::default()
             }
         }));
+        // Near the panel's end, as the compositor slides a wide popup to stay on screen.
         let popup = widget::Row::new()
             .push(widget::Space::new().width(Length::Fill))
             .push(popup)
@@ -275,10 +329,9 @@ impl cosmic::Application for Preview {
     }
 }
 
-/// `content` in the look of the panel's popup container.
+/// `content`, as wide as it lays out, in the look of the panel's popup container.
 fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     widget::container(content)
-        .width(Length::Fixed(WIDTH))
         .class(cosmic::theme::Container::custom(|theme| {
             let cosmic = theme.cosmic();
             let background = cosmic.background(theme.transparent);

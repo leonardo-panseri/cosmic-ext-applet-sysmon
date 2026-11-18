@@ -20,6 +20,8 @@ the Omarchy plugin [navjottomer.sysmon][omarchy-sysmon] (design only; no code is
   with load, temperature, power and VRAM; each network interface; disk throughput, every mounted
   filesystem and NVMe temperatures; the top 5 processes by CPU and by memory. CPU, GPU and network have
   2-minute graphs.
+- **Popup layout:** one column or two (CPU, memory and GPU beside network, disk and processes). Auto, the
+  default, takes two columns when one wouldn't fit the screen's height without scrolling.
 - **Settings page** in the popup. Changes apply at once and are kept.
 - **Right click** on the panel button, or **Process monitor** in the popup, opens COSMIC's System Monitor,
   or the app you choose in the settings: a desktop ID (`io.missioncenter.MissionCenter`) or a command

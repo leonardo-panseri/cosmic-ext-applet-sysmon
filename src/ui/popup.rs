@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! The popup (plan §2.2, §2.3): the stats page in a scrollable area over a footer with the
-//! **Process monitor** and **Settings** buttons, or the settings page.
+//! **Process monitor** and **Settings** buttons, or the settings page. In two columns, CPU, memory
+//! and GPU sit beside network, disk and processes, a divider between them, over the same footer.
 //!
 //! Everything here lays out the latest [`Stats`] and reads nothing else, so a redraw costs only
 //! the layout. All system-supplied text (models, interface names, mount points, process names) is
@@ -27,12 +28,11 @@ use crate::app::Message;
 use crate::fl;
 use crate::panel::{LimitKind, PanelSettings, format};
 use crate::sampler::stats::{DiskStats, GpuSample, MinMax, Stats, share};
+use crate::ui::columns::Columns;
 use crate::ui::settings::{self, SettingsModels};
 use crate::ui::{graph, icons};
 use sysmon_proto::{Mount, Process};
 
-/// The stats page scrolls beyond this, so the popup stays on screen with the footer.
-pub const PAGE_MAX_HEIGHT: f32 = 680.0;
 /// The width of the value column of a stat row: "212G / 928G".
 const VALUE_WIDTH: f32 = 104.0;
 /// The width of the percentage column: "100%".
@@ -55,21 +55,23 @@ pub enum Page {
     Settings,
 }
 
-/// The popup's content: `page`, for `stats` (`None` before the first sample), with values at or
-/// above `settings`' limits in the warning colour. The stats page scrolls beyond `max_height`;
-/// the settings page shows `settings` with the segmented controls of `models`.
+/// The popup's content, [`Columns::width`] wide: `page`, for `stats` (`None` before the first
+/// sample), with values at or above `settings`' limits in the warning colour. The stats page
+/// scrolls beyond `max_height`; the settings page shows `settings` with the segmented controls
+/// of `models`.
 pub fn view<'a>(
     stats: Option<&'a Stats>,
     settings: &PanelSettings,
     models: &'a SettingsModels,
     page: Page,
+    columns: Columns,
     max_height: f32,
 ) -> Element<'a, Message> {
     let spacing = cosmic::theme::spacing();
     let content: Element<'a, Message> = match page {
         Page::Stats => {
             let body = match stats {
-                Some(stats) => stats_page(stats, settings),
+                Some(stats) => stats_page(stats, settings, columns),
                 None => widget::text::body(fl!("placeholder")).into(),
             };
             let body = widget::container(body).padding([0, spacing.space_s]);
@@ -80,31 +82,62 @@ pub fn view<'a>(
                 .into()
         }
         // Padded inside, around its scrollable area.
-        Page::Settings => settings::view(models, settings),
+        Page::Settings => settings::view(models, settings, columns, max_height),
     };
     widget::container(content)
         .padding([spacing.space_s, 0])
-        .width(Length::Fill)
+        .width(Length::Fixed(columns.width()))
         .into()
 }
 
-/// The sections of §2.2, in the reference's order, between dividers.
-fn stats_page<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> {
-    with_dividers(sections(stats, settings))
+/// The sections of §2.2, in the reference's order, between dividers: in one column, or the first
+/// three beside the rest.
+fn stats_page<'a>(
+    stats: &'a Stats,
+    settings: &PanelSettings,
+    columns: Columns,
+) -> Element<'a, Message> {
+    let mut first = first_sections(stats, settings);
+    let second = second_sections(stats, settings);
+    match columns {
+        Columns::One => {
+            first.extend(second);
+            with_dividers(first)
+        }
+        Columns::Two => side_by_side(with_dividers(first), with_dividers(second)),
+    }
 }
 
-fn sections<'a>(stats: &'a Stats, settings: &PanelSettings) -> Vec<Element<'a, Message>> {
+/// CPU, memory and the GPUs, if any.
+fn first_sections<'a>(stats: &'a Stats, settings: &PanelSettings) -> Vec<Element<'a, Message>> {
     [
         Some(cpu(stats, settings)),
         Some(memory(stats, settings)),
         (!stats.gpus.is_empty()).then(|| gpus(stats, settings)),
-        Some(network(stats)),
-        Some(disk(stats, settings)),
-        Some(processes(stats)),
     ]
     .into_iter()
     .flatten()
     .collect()
+}
+
+/// Network, disk and processes.
+fn second_sections<'a>(stats: &'a Stats, settings: &PanelSettings) -> Vec<Element<'a, Message>> {
+    vec![network(stats), disk(stats, settings), processes(stats)]
+}
+
+/// Two columns of equal width, tops aligned, with a divider between them in the space of the
+/// popup's padding either side.
+pub(super) fn side_by_side<'a>(
+    first: Element<'a, Message>,
+    second: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let spacing = cosmic::theme::spacing();
+    widget::Row::new()
+        .spacing(spacing.space_s)
+        .push(widget::container(first).width(Length::FillPortion(1)))
+        .push(widget::divider::vertical::default())
+        .push(widget::container(second).width(Length::FillPortion(1)))
+        .into()
 }
 
 fn with_dividers(sections: Vec<Element<'_, Message>>) -> Element<'_, Message> {
@@ -116,33 +149,6 @@ fn with_dividers(sections: Vec<Element<'_, Message>>) -> Element<'_, Message> {
         page = page.push(section);
     }
     page.into()
-}
-
-/// The whole stats page in two halves, the first `at` sections and the rest with the footer,
-/// padded as in the popup, to see all of it at once without scrolling (the preview).
-#[cfg(debug_assertions)]
-pub fn stats_page_halves<'a>(
-    stats: &'a Stats,
-    settings: &PanelSettings,
-    at: usize,
-) -> [Element<'a, Message>; 2] {
-    let spacing = cosmic::theme::spacing();
-    let mut first = sections(stats, settings);
-    let second = first.split_off(at.min(first.len()));
-    let pad = |content: Element<'a, Message>| -> Element<'a, Message> {
-        widget::container(content)
-            .padding([spacing.space_s, spacing.space_s])
-            .width(Length::Fill)
-            .into()
-    };
-    [
-        pad(with_dividers(first)),
-        pad(widget::Column::new()
-            .spacing(spacing.space_s)
-            .push(with_dividers(second))
-            .push(footer())
-            .into()),
-    ]
 }
 
 /// Big total load and uptime on the left; thread count, load average and package temperature on
