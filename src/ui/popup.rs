@@ -216,7 +216,7 @@ fn memory<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message
                 percent.map(|p| (format::percent(p), settings.warns(LimitKind::Memory, p))),
             ),
             stats.extremes.memory,
-            format::percent,
+            bytes,
             Position::Top,
         ));
         let swap = share(mem.swap_used(), mem.swap_total).unwrap_or(0.0);
@@ -266,7 +266,7 @@ fn gpus<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> 
                     )),
                 ),
                 gpu.extremes.vram,
-                format::percent,
+                bytes,
                 Position::Top,
             ));
         }
@@ -395,15 +395,19 @@ fn disk<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> 
 
 fn disk_block<'a>(disk: &'a DiskStats, settings: &PanelSettings) -> Element<'a, Message> {
     let temp: Element<'a, Message> = match &disk.temp {
-        Some(t) => widget::Row::new()
-            .spacing(cosmic::theme::spacing().space_xxxs)
-            .align_y(Alignment::Center)
-            .push(temperature_icon())
-            .push(warn_if(
-                widget::text::body(format::celsius(t.celsius)),
-                settings.nvme_hot(t),
-            ))
-            .into(),
+        Some(t) => since_start(
+            widget::Row::new()
+                .spacing(cosmic::theme::spacing().space_xxxs)
+                .align_y(Alignment::Center)
+                .push(temperature_icon())
+                .push(warn_if(
+                    widget::text::body(format::celsius(t.celsius)),
+                    settings.nvme_hot(t),
+                )),
+            t.extremes,
+            format::celsius,
+            Position::Top,
+        ),
         None => widget::Space::new().into(),
     };
     let mut rows = vec![block_header(
@@ -638,6 +642,14 @@ fn since_start<'a>(
     .into()
 }
 
+/// A size held as an [`MinMax`] value, as the rows write it: "5.2G".
+fn bytes(value: f32) -> String {
+    // Sizes recorded from `u64`s: never negative, and far below `u64::MAX`.
+    #[expect(clippy::cast_possible_truncation, reason = "see above")]
+    #[expect(clippy::cast_sign_loss, reason = "see above")]
+    format::used(value.round() as u64)
+}
+
 /// "Since start: min 3% · max 97%".
 fn since_start_text(range: MinMax, format: fn(f32) -> String) -> String {
     fl!(
@@ -810,6 +822,15 @@ mod tests {
         assert_eq!(
             strip(since_start_text(range, format::celsius)),
             "Since start: min 41°C · max 88°C"
+        );
+        #[expect(clippy::cast_precision_loss, reason = "test sizes")]
+        let range = MinMax {
+            min: (5_600u64 << 20) as f32,
+            max: (12u64 << 30) as f32,
+        };
+        assert_eq!(
+            strip(since_start_text(range, bytes)),
+            "Since start: min 5.5G · max 12G"
         );
     }
 

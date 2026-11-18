@@ -587,6 +587,7 @@ mod tests {
                 name: model.into(),
                 celsius,
                 limit: None,
+                extremes: None,
             }),
             mounts: Vec::new(),
         }

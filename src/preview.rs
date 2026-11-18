@@ -634,7 +634,7 @@ pub fn fixture() -> Stats {
         extremes: Extremes {
             cpu: Some(range(3.0, 97.0)),
             cpu_temp: Some(range(42.0, 88.0)),
-            memory: Some(range(31.0, 58.0)),
+            memory: Some(range(gib(9.3), gib(17.4))),
         },
     }
 }
@@ -643,17 +643,25 @@ fn range(min: f32, max: f32) -> MinMax {
     MinMax { min, max }
 }
 
+/// `value` GiB, as a size [`MinMax`] holds.
+#[expect(clippy::cast_precision_loss, reason = "preview sizes")]
+fn gib(value: f32) -> f32 {
+    value * GIB as f32
+}
+
 fn drives() -> [DriveTemp; 2] {
     [
         DriveTemp {
             name: "Samsung SSD 980 PRO 1TB".into(),
             celsius: 41.0,
             limit: Some(82.0),
+            extremes: Some(range(36.0, 58.0)),
         },
         DriveTemp {
             name: "WD_BLACK SN850X 2TB".into(),
             celsius: 38.0,
             limit: Some(84.0),
+            extremes: Some(range(33.0, 51.0)),
         },
     ]
 }
@@ -705,7 +713,7 @@ fn gpus() -> Vec<GpuSample> {
             extremes: GpuExtremes {
                 busy: Some(range(0.0, 100.0)),
                 celsius: Some(range(45.0, 79.0)),
-                vram: Some(range(4.0, 61.0)),
+                vram: Some(range(gib(0.3), gib(4.9))),
             },
             ..GpuSample::default()
         },
@@ -721,7 +729,7 @@ fn gpus() -> Vec<GpuSample> {
             extremes: GpuExtremes {
                 busy: Some(range(0.0, 96.0)),
                 celsius: Some(range(38.0, 71.0)),
-                vram: Some(range(12.0, 44.0)),
+                vram: Some(range(gib(0.25), gib(0.9))),
             },
             ..GpuSample::default()
         },

@@ -60,6 +60,8 @@ pub struct DriveTemp {
     pub celsius: f32,
     /// The drive's rated limit (hwmon `max`, else `crit`), °C.
     pub limit: Option<f32>,
+    /// Filled in by the [`Tracker`]: the temperature's extremes since start.
+    pub extremes: Option<MinMax>,
 }
 
 /// One DRM card. Its stats are `None` unless the card [may be queried](RuntimeStatus::may_query)
@@ -139,6 +141,12 @@ impl MinMax {
     }
 }
 
+/// `value` bytes as an [`MinMax`] value; f32's 24 bits keep sizes to within a few KiB per GiB.
+#[expect(clippy::cast_precision_loss, reason = "see above")]
+fn bytes(value: u64) -> f32 {
+    value as f32
+}
+
 /// The extremes the popup shows on hover, since the applet started.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Extremes {
@@ -146,7 +154,7 @@ pub struct Extremes {
     pub cpu: Option<MinMax>,
     /// CPU package temperature, °C.
     pub cpu_temp: Option<MinMax>,
-    /// Memory in use, %.
+    /// Memory in use, bytes.
     pub memory: Option<MinMax>,
 }
 
@@ -157,7 +165,7 @@ pub struct GpuExtremes {
     pub busy: Option<MinMax>,
     /// Temperature, °C.
     pub celsius: Option<MinMax>,
-    /// VRAM in use, % of the total.
+    /// VRAM in use, bytes.
     pub vram: Option<MinMax>,
 }
 
@@ -169,12 +177,7 @@ impl GpuExtremes {
         }
         MinMax::record(&mut self.busy, gpu.busy.map(f32::from));
         MinMax::record(&mut self.celsius, gpu.celsius);
-        MinMax::record(
-            &mut self.vram,
-            gpu.vram_used
-                .zip(gpu.vram_total)
-                .and_then(|(u, t)| share(u, t)),
-        );
+        MinMax::record(&mut self.vram, gpu.vram_used.map(bytes));
     }
 }
 
@@ -309,6 +312,8 @@ pub struct Tracker {
     extremes: Extremes,
     /// Each GPU's extremes, by card. Grows when a card appears, so a tick allocates nothing.
     gpu_extremes: Vec<(String, GpuExtremes)>,
+    /// Each NVMe drive's temperature extremes, by its disk, else its name.
+    drive_extremes: Vec<(String, Option<MinMax>)>,
 }
 
 impl Tracker {
@@ -366,9 +371,11 @@ impl Tracker {
             self.push_interface_history(&net);
         }
         self.push_gpu_history(&sample.gpus);
+        let mut drives = sample.drives;
+        self.record_drive_extremes(&mut drives, &sample.drive_disks);
         let (disk_stats, other_mounts) = group_disks(
             &disks,
-            &sample.drives,
+            &drives,
             &sample.drive_disks,
             &sample.mounts,
             &sample.disk_layout,
@@ -386,7 +393,7 @@ impl Tracker {
             net_total,
             disk_total,
             cpu_temp: sample.cpu_temp,
-            drives: sample.drives,
+            drives,
             gpus,
             mounts: sample.mounts,
             disks: disk_stats,
@@ -407,10 +414,7 @@ impl Tracker {
     ) {
         MinMax::record(&mut self.extremes.cpu, cpu);
         MinMax::record(&mut self.extremes.cpu_temp, cpu_temp);
-        MinMax::record(
-            &mut self.extremes.memory,
-            mem.and_then(|m| share(m.mem_used(), m.mem_total)),
-        );
+        MinMax::record(&mut self.extremes.memory, mem.map(|m| bytes(m.mem_used())));
         for gpu in gpus {
             let i = if let Some(i) = self.gpu_extremes.iter().position(|(c, _)| *c == gpu.card) {
                 i
@@ -422,6 +426,26 @@ impl Tracker {
             let extremes = &mut self.gpu_extremes[i].1;
             extremes.record(gpu);
             gpu.extremes = *extremes;
+        }
+    }
+
+    /// Widens each drive's temperature extremes, and copies them into `drives`. `drive_disks`
+    /// says which disk each drive is.
+    fn record_drive_extremes(&mut self, drives: &mut [DriveTemp], drive_disks: &[Option<String>]) {
+        for (i, drive) in drives.iter_mut().enumerate() {
+            let key = drive_disks
+                .get(i)
+                .and_then(Option::as_deref)
+                .unwrap_or(&drive.name);
+            let i = if let Some(i) = self.drive_extremes.iter().position(|(k, _)| k == key) {
+                i
+            } else {
+                self.drive_extremes.push((key.to_owned(), None));
+                self.drive_extremes.len() - 1
+            };
+            let extremes = &mut self.drive_extremes[i].1;
+            MinMax::record(extremes, Some(drive.celsius));
+            drive.extremes = *extremes;
         }
     }
 
@@ -826,7 +850,7 @@ mod tests {
         let first = tracker.ingest(sample(0, 0, 300, Some(50.0)), at(0));
         // No CPU load before two samples, so no range either.
         assert_eq!(first.extremes.cpu, None);
-        assert_eq!(first.extremes.memory, Some(MinMax::new(30.0)));
+        assert_eq!(first.extremes.memory, Some(MinMax::new(300.0)));
         // 25 % busy, then 75 %, then 50 %: the range keeps 25–75.
         tracker.ingest(sample(25, 75, 600, Some(70.0)), at(1));
         tracker.ingest(sample(100, 100, 200, None), at(2));
@@ -841,8 +865,8 @@ mod tests {
         assert_eq!(
             stats.extremes.memory,
             Some(MinMax {
-                min: 20.0,
-                max: 60.0
+                min: 200.0,
+                max: 600.0
             })
         );
         assert_eq!(
@@ -890,8 +914,38 @@ mod tests {
         let range = |min, max| Some(MinMax { min, max });
         assert_eq!(
             (gpu.extremes.busy, gpu.extremes.celsius, gpu.extremes.vram),
-            (range(10.0, 90.0), range(45.0, 60.0), range(10.0, 80.0))
+            (range(10.0, 90.0), range(45.0, 60.0), range(100.0, 800.0))
         );
+    }
+
+    #[test]
+    fn each_drive_keeps_its_temperature_extremes() {
+        let mut tracker = Tracker::default();
+        let t0 = Instant::now();
+        let drive = |name: &str, celsius| DriveTemp {
+            name: name.into(),
+            celsius,
+            limit: None,
+            extremes: None,
+        };
+        // Two drives of one model, told apart by their disks.
+        let sample = |a, b| Sample {
+            drives: vec![drive("Same model", a), drive("Same model", b)],
+            drive_disks: vec![Some("nvme0n1".into()), Some("nvme1n1".into())],
+            ..Sample::default()
+        };
+        tracker.ingest(sample(40.0, 30.0), t0);
+        tracker.ingest(sample(55.0, 35.0), t0 + Duration::from_secs(2));
+        let stats = tracker.ingest(sample(45.0, 33.0), t0 + Duration::from_secs(4));
+        let range = |min, max| Some(MinMax { min, max });
+        let extremes: Vec<_> = stats.drives.iter().map(|d| d.extremes).collect();
+        assert_eq!(extremes, [range(40.0, 55.0), range(30.0, 35.0)]);
+        let on_disks: Vec<_> = stats
+            .disks
+            .iter()
+            .map(|d| d.temp.as_ref().and_then(|t| t.extremes))
+            .collect();
+        assert_eq!(on_disks, [range(40.0, 55.0), range(30.0, 35.0)]);
     }
 
     fn mount(mount_point: &str, device: &str) -> Mount {
@@ -952,6 +1006,7 @@ mod tests {
             name: name.into(),
             celsius: 40.0,
             limit: Some(80.0),
+            extremes: None,
         };
         let sample = |read| Sample {
             // In /proc/diskstats order.

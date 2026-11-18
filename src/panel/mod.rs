@@ -486,11 +486,13 @@ mod tests {
                     name: "Fast SSD".into(),
                     celsius: 70.0,
                     limit: Some(70.0),
+                    extremes: None,
                 },
                 DriveTemp {
                     name: "No limit".into(),
                     celsius: 99.0,
                     limit: None,
+                    extremes: None,
                 },
             ],
             ..Stats::default()
@@ -735,6 +737,7 @@ mod tests {
             name: "Samsung SSD 980 PRO".into(),
             celsius: 74.0,
             limit: Some(70.0),
+            extremes: None,
         };
         Stats {
             drives: vec![drive.clone()],
@@ -884,6 +887,7 @@ mod tests {
             name: name.into(),
             celsius,
             limit: rated,
+            extremes: None,
         }
     }
 

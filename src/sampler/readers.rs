@@ -614,6 +614,7 @@ impl Readers {
                         name: d.name.clone(),
                         celsius,
                         limit,
+                        extremes: None,
                     },
                     d.disk.clone(),
                 )),
@@ -1075,6 +1076,7 @@ mod tests {
             name: "hwmon0".into(),
             celsius,
             limit: Some(limit),
+            extremes: None,
         }
     }
 
