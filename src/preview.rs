@@ -2,9 +2,10 @@
 
 //! Debug builds only: `SYSMON_PREVIEW=1 cargo run` shows the panel button and the popup in an
 //! ordinary window, fed with fixed, made-up [`Stats`] ([`fixture`]): two GPUs (a suspended
-//! NVIDIA card and an AMD iGPU), two network interfaces, three filesystems, two `NVMe` drives and
-//! full histories. Nothing is read from the system, so no GPU is woken. The **Settings** button
-//! switches pages; settings apply to the preview only; **Process monitor** only prints.
+//! NVIDIA card and an AMD iGPU), two network interfaces, two `NVMe` drives with four filesystems
+//! (one on LUKS), full histories and the min/max since start. Nothing is read from the system,
+//! so no GPU is woken. The **Settings** button switches pages; settings apply to the preview
+//! only; **Process monitor** only prints.
 //!
 //! `SYSMON_PREVIEW_SCREENSHOT=<file>` instead draws a mock top panel over a backdrop, in COSMIC's
 //! default dark theme, saves the window's pixels to `<file>` and exits. `SYSMON_PREVIEW_HEIGHT`
@@ -15,7 +16,9 @@
 //!
 //! `SYSMON_PREVIEW_LIVE=1` instead feeds the preview from the real sampler, as the panel does
 //! (closed tier, or open tier with `SYSMON_DEBUG_OPEN`), to measure redraws and wakeups in an
-//! ordinary window; `SYSMON_DEBUG` then logs the redraw counts of each sample.
+//! ordinary window; `SYSMON_DEBUG` then logs the redraw counts of each sample. With
+//! `SYSMON_PREVIEW_SCREENSHOT` too, the screenshot waits [`LIVE_SHOT_DELAY`], for the rates of a
+//! second sample.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,7 +34,10 @@ use crate::app::{self, Message};
 use crate::panel::{PanelSettings, PanelSummary};
 use crate::sampler::history::{HISTORY_LEN, History};
 use crate::sampler::rates::PairRate;
-use crate::sampler::stats::{DeviceRate, DriveTemp, GpuSample, Histories, InterfaceHistory, Stats};
+use crate::sampler::stats::{
+    DeviceRate, DiskStats, DriveTemp, Extremes, GpuExtremes, GpuSample, Histories,
+    InterfaceHistory, MinMax, Stats,
+};
 use crate::sources::drm::RuntimeStatus;
 use crate::sources::loadavg::LoadAvg;
 use crate::sources::meminfo::MemInfo;
@@ -47,6 +53,8 @@ const WIDTH: f32 = 372.0;
 const SHOT: Size = Size::new(640.0, 900.0);
 /// Time for the first frames and the icons to load before the screenshot.
 const SHOT_DELAY: Duration = Duration::from_millis(1500);
+/// The same, from the live sampler: two samples, so the rates are in.
+const LIVE_SHOT_DELAY: Duration = Duration::from_secs(5);
 
 pub fn run() -> cosmic::iced::Result {
     let shot = std::env::var("SYSMON_PREVIEW_SCREENSHOT").ok();
@@ -108,17 +116,18 @@ impl cosmic::Application for Preview {
     }
 
     fn init(mut core: cosmic::Core, shot: Self::Flags) -> (Self, Task<cosmic::Action<Message>>) {
+        let live = std::env::var_os("SYSMON_PREVIEW_LIVE").is_some();
         let task = match (&shot, core.main_window_id()) {
             (Some(path), Some(id)) => {
                 // Only the view: no header bar, padding or rounded corners.
                 core.window.show_headerbar = false;
                 core.window.content_container = false;
                 core.window.sharp_corners = true;
-                screenshot(id, path.clone())
+                let delay = if live { LIVE_SHOT_DELAY } else { SHOT_DELAY };
+                screenshot(id, path.clone(), delay)
             }
             _ => Task::none(),
         };
-        let live = shot.is_none() && std::env::var_os("SYSMON_PREVIEW_LIVE").is_some();
         let stats = Arc::new(fixture());
         let settings = PanelSettings::default();
         let summary = PanelSummary::new(
@@ -290,9 +299,9 @@ fn sleep<T: Send + 'static>(duration: Duration) -> Task<T> {
     Task::future(delay).discard()
 }
 
-/// After [`SHOT_DELAY`], saves the window's pixels to `path` and exits.
-fn screenshot(id: window::Id, path: String) -> Task<cosmic::Action<Message>> {
-    sleep(SHOT_DELAY).chain(window::screenshot(id).then(move |shot| {
+/// After `delay`, saves the window's pixels to `path` and exits.
+fn screenshot(id: window::Id, path: String, delay: Duration) -> Task<cosmic::Action<Message>> {
+    sleep(delay).chain(window::screenshot(id).then(move |shot| {
         let mut file = b"RGBA".to_vec();
         file.extend_from_slice(&shot.size.width.to_le_bytes());
         file.extend_from_slice(&shot.size.height.to_le_bytes());
@@ -361,7 +370,12 @@ fn mount(mount_point: &str, device: &str, total: u64, used: u64) -> Mount {
     Mount {
         mount_point: mount_point.into(),
         device: device.into(),
-        fs_type: "ext4".into(),
+        fs_type: if mount_point == "/boot" {
+            "vfat"
+        } else {
+            "ext4"
+        }
+        .into(),
         total,
         used,
         // As ext4 reserves 5 % for root.
@@ -389,7 +403,7 @@ pub fn fixture() -> Stats {
     let history = Histories {
         cpu: wave(38.0, 14.0, 0.0),
         memory: wave(39.0, 4.0, 0.7),
-        swap: wave(6.0, 3.0, 2.4),
+        swap: wave(8.0, 3.0, 2.4),
         gpus: vec![
             ("card0".into(), idle()),
             ("card1".into(), wave(30.0, 18.0, 1.3)),
@@ -416,7 +430,7 @@ pub fn fixture() -> Stats {
             mem_total: 30 * GIB,
             mem_available: 30 * GIB - 11_811_160_064,
             swap_total: 8 * GIB,
-            swap_free: 8 * GIB,
+            swap_free: 8 * GIB - 644_245_094,
         }),
         load: Some(LoadAvg {
             one: 1.84,
@@ -428,26 +442,68 @@ pub fn fixture() -> Stats {
         net,
         disk_total: Some(rate(3.0 * MIB, 780.0 * KIB)),
         cpu_temp: Some(54.0),
-        drives: vec![
-            DriveTemp {
-                name: "Samsung SSD 980 PRO 1TB".into(),
-                celsius: 41.0,
-                limit: Some(82.0),
-            },
-            DriveTemp {
-                name: "WD_BLACK SN850X 2TB".into(),
-                celsius: 38.0,
-                limit: Some(84.0),
-            },
-        ],
+        drives: drives().to_vec(),
         gpus: gpus(),
         mounts: mounts(),
+        disks: disks(),
+        other_mounts: Vec::new(),
         processes: Some(processes()),
         history,
-        disks: Vec::new(),
-        other_mounts: Vec::new(),
-        extremes: crate::sampler::stats::Extremes::default(),
+        extremes: Extremes {
+            cpu: Some(range(3.0, 97.0)),
+            cpu_temp: Some(range(42.0, 88.0)),
+            memory: Some(range(31.0, 58.0)),
+        },
     }
+}
+
+fn range(min: f32, max: f32) -> MinMax {
+    MinMax { min, max }
+}
+
+fn drives() -> [DriveTemp; 2] {
+    [
+        DriveTemp {
+            name: "Samsung SSD 980 PRO 1TB".into(),
+            celsius: 41.0,
+            limit: Some(82.0),
+        },
+        DriveTemp {
+            name: "WD_BLACK SN850X 2TB".into(),
+            celsius: 38.0,
+            limit: Some(84.0),
+        },
+    ]
+}
+
+/// The two drives of [`drives`], with the filesystems of [`mounts`] on them.
+fn disks() -> Vec<DiskStats> {
+    let [samsung, wd] = drives();
+    let mounts = mounts();
+    // The LUKS mapping is on `nvme0n1p3`.
+    let on = |sources: &[&str]| {
+        mounts
+            .iter()
+            .filter(|m| sources.iter().any(|s| m.device.starts_with(s)))
+            .cloned()
+            .collect()
+    };
+    vec![
+        DiskStats {
+            name: "nvme0n1".into(),
+            model: samsung.name.clone(),
+            rate: Some(rate(2.6 * MIB, 512.0 * KIB)),
+            temp: Some(samsung),
+            mounts: on(&["/dev/nvme0n1", "/dev/mapper/luks-home"]),
+        },
+        DiskStats {
+            name: "nvme1n1".into(),
+            model: wd.name.clone(),
+            rate: Some(rate(400.0 * KIB, 268.0 * KIB)),
+            temp: Some(wd),
+            mounts: on(&["/dev/nvme1n1"]),
+        },
+    ]
 }
 
 /// A suspended NVIDIA dGPU, named from procfs, with its VRAM size from the cache (D4), and an
@@ -462,6 +518,12 @@ fn gpus() -> Vec<GpuSample> {
             status: RuntimeStatus::Suspended,
             vram_used: Some(0),
             vram_total: Some(8188 << 20),
+            // From the last time it was awake.
+            extremes: GpuExtremes {
+                busy: Some(range(0.0, 100.0)),
+                celsius: Some(range(45.0, 79.0)),
+                vram: Some(range(4.0, 61.0)),
+            },
             ..GpuSample::default()
         },
         GpuSample {
@@ -472,16 +534,22 @@ fn gpus() -> Vec<GpuSample> {
             vram_used: Some(644_245_094),
             vram_total: Some(2 * GIB),
             celsius: Some(51.0),
+            extremes: GpuExtremes {
+                busy: Some(range(0.0, 96.0)),
+                celsius: Some(range(38.0, 71.0)),
+                vram: Some(range(12.0, 44.0)),
+            },
             ..GpuSample::default()
         },
     ]
 }
 
-/// Three filesystems, the last one nearly full.
+/// Four filesystems, `/home` on LUKS and the last one nearly full.
 fn mounts() -> Vec<Mount> {
     vec![
-        mount("/", "/dev/nvme0n1p2", 928 * GIB, 212 * GIB),
-        mount("/home", "/dev/nvme0n1p3", 1_800 * GIB, 1_402 * GIB),
+        mount("/", "/dev/nvme0n1p2", 220 * GIB, 98 * GIB),
+        mount("/boot", "/dev/nvme0n1p1", GIB, 188 << 20),
+        mount("/home", "/dev/mapper/luks-home", 700 * GIB, 402 * GIB),
         mount("/mnt/storage", "/dev/nvme1n1p1", 1_830 * GIB, 1_690 * GIB),
     ]
 }

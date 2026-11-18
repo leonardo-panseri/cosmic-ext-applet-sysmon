@@ -62,14 +62,15 @@ impl BlockTopology {
                         let parent = target.parent()?.file_name()?;
                         Some(clip_name(&parent.to_string_lossy()))
                     });
-                let slaves = std::fs::read_dir(path.join("slaves"))
-                    .map(|d| {
+                let slaves = std::fs::read_dir(path.join("slaves")).map_or_else(
+                    |_| Vec::new(),
+                    |d| {
                         d.take(MAX_ENTRIES)
                             .filter_map(Result::ok)
                             .filter_map(|s| s.file_name().into_string().ok())
                             .collect()
-                    })
-                    .unwrap_or_default();
+                    },
+                );
                 let dm_name = std::fs::read_to_string(path.join("dm/name"))
                     .ok()
                     .map(|n| clip_name(&n))

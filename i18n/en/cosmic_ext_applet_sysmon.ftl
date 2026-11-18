@@ -45,6 +45,10 @@ read = Read
 write = Write
 # A rate: "1.2M/s".
 per-second = { $rate }/s
+# The block of filesystems not on any disk shown above.
+disk-other = Other
+# The tooltip over a value: its lowest and highest since the applet started.
+since-start = Since start: min { $min } · max { $max }
 processes-cpu = CPU
 processes-memory = Memory
 no-processes = Not available

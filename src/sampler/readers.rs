@@ -347,6 +347,9 @@ struct Drive {
     disk: Option<String>,
 }
 
+/// A drive's temperature, and the disk it is ([`Sample::drive_disks`]).
+type DriveTempOn = (DriveTemp, Option<String>);
+
 /// Every file the closed tier reads.
 #[derive(Debug)]
 pub struct Readers {
@@ -378,7 +381,7 @@ pub struct Readers {
     /// The last mounts and when they were asked for.
     mounts: Option<(Instant, Vec<Mount>)>,
     /// The last drive temperatures, with each drive's disk, and when they were read.
-    drive_temps: Option<(Instant, Vec<(DriveTemp, Option<String>)>)>,
+    drive_temps: Option<(Instant, Vec<DriveTempOn>)>,
     discovered_at: Option<Instant>,
     /// A read failed: look for devices again on the next tick.
     failed: bool,
@@ -555,7 +558,7 @@ impl Readers {
     }
 
     /// The drives' temperatures, each with its disk, reread every [`DRIVE_TEMP_EVERY`].
-    fn drives(&mut self, now: Instant) -> Vec<(DriveTemp, Option<String>)> {
+    fn drives(&mut self, now: Instant) -> Vec<DriveTempOn> {
         if let Some((at, temps)) = &self.drive_temps
             && now.duration_since(*at) < DRIVE_TEMP_EVERY
         {

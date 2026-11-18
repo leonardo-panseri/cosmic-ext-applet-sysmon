@@ -6,19 +6,30 @@
 //! Everything here lays out the latest [`Stats`] and reads nothing else, so a redraw costs only
 //! the layout. All system-supplied text (models, interface names, mount points, process names) is
 //! plain text, clipped to one line (D8).
+//!
+//! A section with one block per device (each GPU, each disk, each interface) sets the blocks
+//! apart with space and an inset divider, lighter than the dividers between sections, and heads
+//! each with the device's name in bold.
+//!
+//! Hovering a CPU, memory or GPU value shows its lowest and highest since the applet started, in
+//! iced's own tooltip: an overlay inside the popup's surface, so it needs no surface of its own,
+//! and it redraws only when it opens or closes.
+
+use std::time::Duration;
 
 use cosmic::iced::advanced::text::{Ellipsize, EllipsizeHeightLimit, Wrapping};
 use cosmic::iced::{Alignment, Color, Length};
 use cosmic::prelude::*;
+use cosmic::widget::tooltip::Position;
 use cosmic::widget::{self, icon};
 
 use crate::app::Message;
 use crate::fl;
 use crate::panel::{PanelSettings, format};
-use crate::sampler::stats::{GpuSample, Stats, share};
+use crate::sampler::stats::{DiskStats, GpuSample, MinMax, Stats, share};
 use crate::ui::settings::{self, SettingsModels};
 use crate::ui::{graph, icons};
-use sysmon_proto::Process;
+use sysmon_proto::{Mount, Process};
 
 /// The stats page scrolls beyond this, so the popup stays on screen with the footer.
 pub const PAGE_MAX_HEIGHT: f32 = 680.0;
@@ -31,6 +42,9 @@ const ICON_SIZE: u16 = 16;
 const BUSY_CORE: f32 = 85.0;
 /// The opacity of secondary text, relative to the text colour.
 const MUTED_ALPHA: f32 = 0.65;
+/// How long the cursor rests on a value before its min/max tooltip opens, so sweeping across
+/// the popup doesn't flash them.
+const TOOLTIP_DELAY: Duration = Duration::from_millis(400);
 
 /// Which page the popup shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -137,8 +151,11 @@ pub fn stats_page_halves<'a>(
 fn cpu<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> {
     let spacing = cosmic::theme::spacing();
     let left = widget::Column::new()
-        .push(widget::text::title2(
-            stats.cpu.map_or_else(|| fl!("no-value"), format::percent),
+        .push(since_start(
+            widget::text::title2(stats.cpu.map_or_else(|| fl!("no-value"), format::percent)),
+            stats.extremes.cpu,
+            format::percent,
+            Position::Bottom,
         ))
         .push(muted(widget::text::caption(
             stats.uptime.map_or_else(String::new, uptime),
@@ -154,9 +171,14 @@ fn cpu<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> {
         ))));
     }
     if let Some(temp) = stats.cpu_temp {
-        right = right.push(warn_if(
-            widget::text::body(format::celsius(temp)),
-            settings.hot(temp),
+        right = right.push(since_start(
+            warn_if(
+                widget::text::body(format::celsius(temp)),
+                settings.hot(temp),
+            ),
+            stats.extremes.cpu_temp,
+            format::celsius,
+            Position::Bottom,
         ));
     }
     widget::Column::new()
@@ -173,15 +195,20 @@ fn cpu<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> {
         .into()
 }
 
-fn memory<'a>(stats: &Stats, settings: &PanelSettings) -> Element<'a, Message> {
+fn memory<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> {
     let mut rows = Vec::new();
     if let Some(mem) = stats.mem {
         let percent = stats.memory_percent();
-        rows.push(stat_row(
-            memory_icon(),
-            fl!("in-use"),
-            used_of_total(mem.mem_used(), mem.mem_total),
-            percent.map(|p| (format::percent(p), settings.full(p))),
+        rows.push(since_start(
+            stat_row(
+                memory_icon(),
+                fl!("in-use"),
+                used_of_total(mem.mem_used(), mem.mem_total),
+                percent.map(|p| (format::percent(p), settings.full(p))),
+            ),
+            stats.extremes.memory,
+            format::percent,
+            Position::Top,
         ));
         let swap = share(mem.swap_used(), mem.swap_total).unwrap_or(0.0);
         rows.push(stat_row(
@@ -189,6 +216,11 @@ fn memory<'a>(stats: &Stats, settings: &PanelSettings) -> Element<'a, Message> {
             fl!("swap"),
             used_of_total(mem.swap_used(), mem.swap_total),
             Some((format::percent(swap), false)),
+        ));
+        // In use above the line, swap below.
+        rows.push(graph::mirrored_percent(
+            &stats.history.memory,
+            &stats.history.swap,
         ));
     }
     section(fl!("section-memory"), rows)
@@ -205,25 +237,30 @@ fn gpus<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> 
             .find(|(c, _)| c == card)
             .map(|(_, h)| h)
     };
-    let mut blocks = Vec::new();
-    for gpu in stats.gpus_nvidia_first() {
-        blocks.push(gpu_header(gpu, settings));
+    let gpus = stats.gpus_nvidia_first().map(|gpu| {
+        let mut rows = vec![gpu_header(gpu, settings)];
         if gpu.busy.is_some()
             && let Some(history) = history(&gpu.card)
         {
-            blocks.push(graph::percent(history));
+            rows.push(graph::percent(history));
         }
         if let (Some(used), Some(total)) = (gpu.vram_used, gpu.vram_total) {
             let percent = share(used, total).unwrap_or(0.0);
-            blocks.push(stat_row(
-                memory_icon(),
-                fl!("vram"),
-                used_of_total(used, total),
-                Some((format::percent(percent), false)),
+            rows.push(since_start(
+                stat_row(
+                    memory_icon(),
+                    fl!("vram"),
+                    used_of_total(used, total),
+                    Some((format::percent(percent), false)),
+                ),
+                gpu.extremes.vram,
+                format::percent,
+                Position::Top,
             ));
         }
-    }
-    section(fl!("section-gpu"), blocks)
+        block(rows)
+    });
+    section(fl!("section-gpu"), vec![blocks(gpus)])
 }
 
 /// The GPU's name, then "load · temperature · power", or "Suspended".
@@ -238,16 +275,23 @@ fn gpu_header<'a>(gpu: &GpuSample, settings: &PanelSettings) -> Element<'a, Mess
     } else {
         let mut parts: Vec<Element<'a, Message>> = Vec::new();
         if let Some(busy) = gpu.busy {
-            parts.push(widget::text::body(format::percent(f32::from(busy))).into());
+            parts.push(since_start(
+                widget::text::body(format::percent(f32::from(busy))),
+                gpu.extremes.busy,
+                format::percent,
+                Position::Top,
+            ));
         }
         if let Some(temp) = gpu.celsius {
-            parts.push(
+            parts.push(since_start(
                 warn_if(
                     widget::text::body(format::celsius(temp)),
                     settings.hot(temp),
-                )
-                .into(),
-            );
+                ),
+                gpu.extremes.celsius,
+                format::celsius,
+                Position::Top,
+            ));
         }
         if let Some(watts) = gpu.watts {
             parts.push(widget::text::body(format::watts(watts)).into());
@@ -259,13 +303,7 @@ fn gpu_header<'a>(gpu: &GpuSample, settings: &PanelSettings) -> Element<'a, Mess
             values = values.push(part);
         }
     }
-    widget::Row::new()
-        .spacing(cosmic::theme::spacing().space_xxs)
-        .align_y(Alignment::Center)
-        .push(named_icon("video-display-symbolic"))
-        .push(one_line(widget::text::body(name)).width(Length::Fill))
-        .push(values)
-        .into()
+    block_header(named_icon("video-display-symbolic"), name, values.into())
 }
 
 /// Download and upload with a mirrored graph; one block per interface when more than one moved
@@ -277,80 +315,143 @@ fn network(stats: &Stats) -> Element<'_, Message> {
         .iter()
         .filter(|h| h.had_traffic())
         .collect();
-    let mut blocks = Vec::new();
+    let mut rows = Vec::new();
     if in_use.len() > 1 {
-        for history in in_use {
+        let interfaces = in_use.into_iter().map(|history| {
             let rate = stats
                 .net
                 .iter()
                 .find(|d| d.name == history.name)
                 .and_then(|d| d.rate);
-            blocks.push(
-                widget::Row::new()
-                    .spacing(cosmic::theme::spacing().space_xxs)
-                    .align_y(Alignment::Center)
-                    .push(named_icon(interface_icon(&history.name)))
-                    .push(one_line(widget::text::body(history.name.as_str())))
-                    .into(),
-            );
-            blocks.extend(rates(
+            let mut rows = vec![block_header(
+                named_icon(interface_icon(&history.name)),
+                history.name.clone(),
+                widget::Space::new().into(),
+            )];
+            rows.extend(rates(
                 rate.map(|r| (r.first, r.second)),
                 [
                     ("network-receive-symbolic", fl!("download-label")),
                     ("network-transmit-symbolic", fl!("upload-label")),
                 ],
             ));
-            blocks.push(graph::mirrored(&history.down, &history.up));
-        }
+            rows.push(graph::mirrored(&history.down, &history.up));
+            block(rows)
+        });
+        rows.push(blocks(interfaces));
     } else {
-        blocks.extend(rates(
+        rows.extend(rates(
             stats.net_total.map(|r| (r.first, r.second)),
             [
                 ("network-receive-symbolic", fl!("download-label")),
                 ("network-transmit-symbolic", fl!("upload-label")),
             ],
         ));
-        blocks.push(graph::mirrored(
+        rows.push(graph::mirrored(
             &stats.history.net_down,
             &stats.history.net_up,
         ));
     }
-    section(fl!("section-network"), blocks)
+    section(fl!("section-network"), rows)
 }
 
-/// Read and write rates, space per filesystem and the `NVMe` temperatures.
+/// One block per physical disk: its model and temperature, its own read and write rates, and
+/// its filesystems with their space; then the filesystems on no counted disk.
 fn disk<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> {
-    let mut rows = rates(
-        stats.disk_total.map(|r| (r.first, r.second)),
-        [
-            ("document-open-symbolic", fl!("read")),
-            ("document-save-symbolic", fl!("write")),
-        ],
-    );
-    for mount in &stats.mounts {
-        let percent = mount.used_percent();
-        rows.push(stat_row(
-            named_icon("folder-symbolic"),
-            mount.mount_point.clone(),
-            used_of_total(mount.used, mount.total),
-            percent.map(|p| (format::percent(p), settings.full(p))),
-        ));
+    let mut disks: Vec<Element<'a, Message>> = stats
+        .disks
+        .iter()
+        .map(|disk| disk_block(disk, settings))
+        .collect();
+    if !stats.other_mounts.is_empty() {
+        let mut rows = vec![block_header(
+            named_icon("drive-multidisk-symbolic"),
+            fl!("disk-other"),
+            widget::Space::new().into(),
+        )];
+        rows.extend(stats.other_mounts.iter().map(|m| mount_rows(m, settings)));
+        disks.push(block(rows));
     }
-    for drive in &stats.drives {
-        rows.push(
-            widget::Row::new()
-                .spacing(cosmic::theme::spacing().space_xxs)
-                .align_y(Alignment::Center)
-                .push(temperature_icon())
-                .push(one_line(widget::text::body(drive.name.as_str())).width(Length::Fill))
-                .push(warn_if(
-                    widget::text::body(format::celsius(drive.celsius)),
-                    drive.hot(),
-                ))
-                .into(),
-        );
-    }
+    let rows = if disks.is_empty() {
+        // Nothing found, as in a container: the total, if any.
+        vec![disk_rates(stats.disk_total.map(|r| (r.first, r.second)))]
+    } else {
+        vec![blocks(disks)]
+    };
     section(fl!("section-disk"), rows)
+}
+
+fn disk_block<'a>(disk: &'a DiskStats, settings: &PanelSettings) -> Element<'a, Message> {
+    let temp: Element<'a, Message> = match &disk.temp {
+        Some(t) => widget::Row::new()
+            .spacing(cosmic::theme::spacing().space_xxxs)
+            .align_y(Alignment::Center)
+            .push(temperature_icon())
+            .push(warn_if(
+                widget::text::body(format::celsius(t.celsius)),
+                t.hot(),
+            ))
+            .into(),
+        None => widget::Space::new().into(),
+    };
+    let mut rows = vec![block_header(
+        named_icon(disk_icon(&disk.name)),
+        disk.model.clone(),
+        temp,
+    )];
+    if !disk.name.is_empty() {
+        rows.push(disk_rates(disk.rate.map(|r| (r.first, r.second))));
+    }
+    rows.extend(disk.mounts.iter().map(|m| mount_rows(m, settings)));
+    block(rows)
+}
+
+/// Read and write on one row, side by side.
+fn disk_rates<'a>(rate: Option<(f64, f64)>) -> Element<'a, Message> {
+    let spacing = cosmic::theme::spacing();
+    let half = |icon: &'static str, label: String, rate: Option<f64>| {
+        widget::Row::new()
+            .spacing(spacing.space_xxs)
+            .align_y(Alignment::Center)
+            .width(Length::FillPortion(1))
+            .push(named_icon(icon))
+            .push(one_line(widget::text::body(label)).width(Length::Fill))
+            .push(widget::text::body(rate_text(rate)).wrapping(Wrapping::None))
+    };
+    widget::Row::new()
+        .spacing(spacing.space_m)
+        .push(half(
+            "document-open-symbolic",
+            fl!("read"),
+            rate.map(|r| r.0),
+        ))
+        .push(half(
+            "document-save-symbolic",
+            fl!("write"),
+            rate.map(|r| r.1),
+        ))
+        .into()
+}
+
+/// A filesystem's row, then its usage bar under the label.
+fn mount_rows<'a>(mount: &'a Mount, settings: &PanelSettings) -> Element<'a, Message> {
+    let spacing = cosmic::theme::spacing();
+    let percent = mount.used_percent();
+    let full = percent.is_some_and(|p| settings.full(p));
+    let row = stat_row(
+        named_icon("folder-symbolic"),
+        mount.mount_point.clone(),
+        used_of_total(mount.used, mount.total),
+        percent.map(|p| (format::percent(p), full)),
+    );
+    let bar = widget::Row::new()
+        .push(widget::Space::new().width(Length::Fixed(f32::from(ICON_SIZE + spacing.space_xxs))))
+        .push(graph::usage_bar(percent.unwrap_or(0.0), full));
+    widget::Column::new()
+        .spacing(spacing.space_xxxs)
+        .push(row)
+        .push(bar)
+        .into()
 }
 
 /// The top processes by CPU and by memory, side by side.
@@ -446,21 +547,92 @@ fn rates<'a>(
     labels: [(&'static str, String); 2],
 ) -> Vec<Element<'a, Message>> {
     let [(first_icon, first), (second_icon, second)] = labels;
-    let text = |r: Option<f64>| {
-        r.map_or_else(
-            || fl!("no-value"),
-            |r| fl!("per-second", rate = format::rate(r)),
-        )
-    };
     vec![
-        stat_row(named_icon(first_icon), first, text(rate.map(|r| r.0)), None),
+        stat_row(
+            named_icon(first_icon),
+            first,
+            rate_text(rate.map(|r| r.0)),
+            None,
+        ),
         stat_row(
             named_icon(second_icon),
             second,
-            text(rate.map(|r| r.1)),
+            rate_text(rate.map(|r| r.1)),
             None,
         ),
     ]
+}
+
+/// "1.2M/s", or a dash without a rate.
+fn rate_text(rate: Option<f64>) -> String {
+    rate.map_or_else(
+        || fl!("no-value"),
+        |r| fl!("per-second", rate = format::rate(r)),
+    )
+}
+
+/// The blocks of a section with one per device, set apart by space and an inset divider.
+fn blocks<'a>(blocks: impl IntoIterator<Item = Element<'a, Message>>) -> Element<'a, Message> {
+    let mut column = widget::Column::new().spacing(cosmic::theme::spacing().space_xs);
+    for (i, block) in blocks.into_iter().enumerate() {
+        if i > 0 {
+            column = column.push(widget::divider::horizontal::light());
+        }
+        column = column.push(block);
+    }
+    column.into()
+}
+
+/// One device's rows.
+fn block(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
+    widget::Column::new()
+        .spacing(cosmic::theme::spacing().space_xxxs)
+        .extend(rows)
+        .into()
+}
+
+/// A block's first row: an icon, the device's name in bold, and `values` at the right edge.
+fn block_header<'a>(
+    icon: Element<'a, Message>,
+    name: String,
+    values: Element<'a, Message>,
+) -> Element<'a, Message> {
+    widget::Row::new()
+        .spacing(cosmic::theme::spacing().space_xxs)
+        .align_y(Alignment::Center)
+        .push(icon)
+        .push(one_line(widget::text::heading(name)).width(Length::Fill))
+        .push(values)
+        .into()
+}
+
+/// `content` with a tooltip, at `position`, of the lowest and highest values since start, if
+/// there are any yet.
+fn since_start<'a>(
+    content: impl Into<Element<'a, Message>>,
+    range: Option<MinMax>,
+    format: fn(f32) -> String,
+    position: Position,
+) -> Element<'a, Message> {
+    let Some(range) = range else {
+        return content.into();
+    };
+    widget::tooltip(
+        content,
+        widget::text::caption(since_start_text(range, format)),
+        position,
+    )
+    .delay(TOOLTIP_DELAY)
+    .into()
+}
+
+/// "Since start: min 3% · max 97%".
+fn since_start_text(range: MinMax, format: fn(f32) -> String) -> String {
+    fl!(
+        "since-start",
+        min = format(range.min),
+        max = format(range.max)
+    )
 }
 
 /// An icon, a label, then the value right-aligned in its column and the percentage in its own,
@@ -542,6 +714,15 @@ fn temperature_icon<'a>() -> Element<'a, Message> {
     icon::icon(icons::temperature()).size(ICON_SIZE).into()
 }
 
+/// A solid-state icon for `NVMe` and MMC disks, else a hard disk.
+fn disk_icon(name: &str) -> &'static str {
+    if name.starts_with("nvme") || name.starts_with("mmcblk") || name.is_empty() {
+        "drive-harddisk-solidstate-symbolic"
+    } else {
+        "drive-harddisk-system-symbolic"
+    }
+}
+
 /// A wireless, mobile or wired icon, from the interface's name as systemd names them.
 fn interface_icon(name: &str) -> &'static str {
     if name.starts_with("wl") {
@@ -597,6 +778,27 @@ mod tests {
         let strip = |s: String| s.replace(['\u{2068}', '\u{2069}'], "");
         assert_eq!(strip(used_of_total(0, 8188 << 20)), "0 / 8G");
         assert_eq!(strip(used_of_total(512 << 20, 8188 << 20)), "512M / 8G");
+    }
+
+    #[test]
+    fn the_min_max_tooltip_shows_both_extremes_formatted() {
+        let strip = |s: String| s.replace(['\u{2068}', '\u{2069}'], "");
+        let range = MinMax {
+            min: 3.2,
+            max: 96.6,
+        };
+        assert_eq!(
+            strip(since_start_text(range, format::percent)),
+            "Since start: min 3% · max 97%"
+        );
+        let range = MinMax {
+            min: 41.0,
+            max: 88.4,
+        };
+        assert_eq!(
+            strip(since_start_text(range, format::celsius)),
+            "Since start: min 41°C · max 88°C"
+        );
     }
 
     #[test]
