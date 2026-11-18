@@ -7,10 +7,11 @@ use std::sync::Arc;
 use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
 use cosmic::iced::event::{PlatformSpecific, wayland};
 use cosmic::iced::futures::{SinkExt, Stream, StreamExt};
-use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
+use cosmic::iced::platform_specific::shell::wayland::commands::popup::destroy_popup;
 use cosmic::iced::window::Id;
 use cosmic::iced::{Limits, Subscription};
 use cosmic::prelude::*;
+use cosmic::surface::action::LiveSettings;
 use cosmic::widget;
 
 use crate::outputs::Outputs;
@@ -285,7 +286,15 @@ impl cosmic::Application for AppModel {
                     .max_width(Columns::Two.width())
                     .min_height(60.0)
                     .max_height(columns::popup_max_height(self.room));
-                return get_popup(popup_settings);
+                // Through libcosmic's surface action, not iced's `get_popup`: libcosmic then knows
+                // the surface is a popup and asks the compositor to blur it under frosted glass.
+                // A popup it doesn't know gets the translucent background without the blur.
+                // With no view of its own here, it still shows `view_window`.
+                return cosmic::surface::surface_task(cosmic::surface::action::app_popup(
+                    |_: &Self| LiveSettings::default(),
+                    move |_: &mut Self| popup_settings.clone(),
+                    None,
+                ));
             }
             Message::OpenProcessMonitor => {
                 launch::process_monitor(&self.settings.process_monitor);
