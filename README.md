@@ -89,7 +89,7 @@ Then, from this repository:
 
 ```sh
 just flatpak-build     # builds into build-flatpak/repo (offline, from flatpak/cargo-sources.json)
-just flatpak-install   # adds build-flatpak/repo as the `sysmon-applet-local` remote and installs from it
+just flatpak-install   # builds, then adds build-flatpak/repo as the `sysmon-applet-local` remote and installs from it
 ```
 
 Open **Settings → Desktop → Panel → Configure panel applets**, press **Add applet** and choose

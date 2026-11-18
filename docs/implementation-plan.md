@@ -191,9 +191,9 @@ Graphs are our own small `canvas::Program`: an area fill in the accent colour on
 symbolic icons, not Nerd Font glyphs. A section with one block per device (GPU, disk, interface) sets the blocks
 apart with space and an inset divider, each headed by the device's name in bold.
 
-Hovering CPU load or temperature, memory in use, a GPU's load, temperature or VRAM, or an NVMe drive's
+Hovering CPU load or temperature, memory or swap in use, a GPU's load, temperature or VRAM, or an NVMe drive's
 temperature shows a tooltip with the lowest and highest value since the applet started, kept in memory by the
-sampler in both tiers. Memory and VRAM show amounts ("5.2G"), not percentages.
+sampler in both tiers. Memory, swap and VRAM show amounts ("5.2G"), not percentages.
 
 ### 2.3 Popup (settings page)
 

@@ -635,6 +635,7 @@ pub fn fixture() -> Stats {
             cpu: Some(range(3.0, 97.0)),
             cpu_temp: Some(range(42.0, 88.0)),
             memory: Some(range(gib(9.3), gib(17.4))),
+            swap: Some(range(0.0, gib(1.2))),
         },
     }
 }

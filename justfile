@@ -93,8 +93,8 @@ flatpak-build *args:
         {{args}} \
         {{flatpak-build-dir / 'app'}} {{flatpak-manifest}}
 
-# Installs the Flatpak built by `just flatpak-build` for the current user
-flatpak-install:
+# Builds the Flatpak from the working tree, then installs it for the current user
+flatpak-install: flatpak-build
     flatpak remote-add --user --if-not-exists --no-gpg-verify {{flatpak-remote}} {{flatpak-repo}}
     flatpak install --user --reinstall --noninteractive {{flatpak-remote}} {{appid}}
 

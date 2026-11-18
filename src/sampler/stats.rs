@@ -156,6 +156,8 @@ pub struct Extremes {
     pub cpu_temp: Option<MinMax>,
     /// Memory in use, bytes.
     pub memory: Option<MinMax>,
+    /// Swap in use, bytes; none without any swap.
+    pub swap: Option<MinMax>,
 }
 
 /// One GPU's extremes since the applet started, from the samples it was awake for.
@@ -415,6 +417,11 @@ impl Tracker {
         MinMax::record(&mut self.extremes.cpu, cpu);
         MinMax::record(&mut self.extremes.cpu_temp, cpu_temp);
         MinMax::record(&mut self.extremes.memory, mem.map(|m| bytes(m.mem_used())));
+        MinMax::record(
+            &mut self.extremes.swap,
+            mem.filter(|m| m.swap_total > 0)
+                .map(|m| bytes(m.swap_used())),
+        );
         for gpu in gpus {
             let i = if let Some(i) = self.gpu_extremes.iter().position(|(c, _)| *c == gpu.card) {
                 i
@@ -831,6 +838,9 @@ mod tests {
         let mut no_swap = memory(100, 0);
         no_swap.mem.as_mut().unwrap().swap_total = 0;
         no_swap.mem.as_mut().unwrap().swap_free = 0;
+        let mut tracker_without_swap = Tracker::default();
+        let without = tracker_without_swap.ingest(no_swap.clone(), t0);
+        assert_eq!(without.extremes.swap, None);
         let stats = tracker.ingest(no_swap, t0 + Duration::from_secs(4));
         assert_eq!(stats.history.swap.latest(), Some(0.0));
         let stats = tracker.ingest(Sample::default(), t0 + Duration::from_secs(6));
@@ -845,7 +855,7 @@ mod tests {
         let sample = |busy, idle, used, temp| Sample {
             stat: Some(stat(busy, idle)),
             cpu_temp: temp,
-            ..memory(used, 0)
+            ..memory(used, used / 4)
         };
         let first = tracker.ingest(sample(0, 0, 300, Some(50.0)), at(0));
         // No CPU load before two samples, so no range either.
@@ -867,6 +877,13 @@ mod tests {
             Some(MinMax {
                 min: 200.0,
                 max: 600.0
+            })
+        );
+        assert_eq!(
+            stats.extremes.swap,
+            Some(MinMax {
+                min: 50.0,
+                max: 150.0
             })
         );
         assert_eq!(

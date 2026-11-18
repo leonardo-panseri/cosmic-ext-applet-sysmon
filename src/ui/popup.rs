@@ -220,11 +220,16 @@ fn memory<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message
             Position::Top,
         ));
         let swap = share(mem.swap_used(), mem.swap_total).unwrap_or(0.0);
-        rows.push(stat_row(
-            named_icon("media-flash-symbolic"),
-            fl!("swap"),
-            used_of_total(mem.swap_used(), mem.swap_total),
-            Some((format::percent(swap), settings.warns(LimitKind::Swap, swap))),
+        rows.push(since_start(
+            stat_row(
+                named_icon("media-flash-symbolic"),
+                fl!("swap"),
+                used_of_total(mem.swap_used(), mem.swap_total),
+                Some((format::percent(swap), settings.warns(LimitKind::Swap, swap))),
+            ),
+            stats.extremes.swap,
+            bytes,
+            Position::Top,
         ));
         // In use above the line, swap below.
         rows.push(graph::mirrored_percent(
