@@ -5,16 +5,34 @@
 
 use cosmic::widget::icon;
 
-use crate::panel::RowKind;
+use crate::fl;
+use crate::panel::Item;
 
-/// A panel row's icon, as the popup shows the same values.
-pub fn row(kind: RowKind) -> icon::Handle {
-    match kind {
-        RowKind::Cpu => cpu(),
-        RowKind::Memory => memory(),
-        RowKind::Gpu => icon::from_name("video-display-symbolic").handle(),
-        RowKind::Disk => icon::from_name("drive-harddisk-system-symbolic").handle(),
-        RowKind::CpuTemp => temperature(),
+/// What stands before an item's value: an icon, or for a network rate an arrow, as the
+/// reference shows them.
+pub enum Glyph {
+    Icon(icon::Handle),
+    Text(String),
+}
+
+/// An item's glyph, as the popup shows the same values: a device's icon, a thermometer for the
+/// CPU temperature, ↓ and ↑ for the network rates. A GPU's or a drive's temperature takes its
+/// device's icon, so the panel tells the three temperatures apart by icon, and each from its
+/// device's other values by unit.
+pub fn item(item: &Item) -> Glyph {
+    let named = |name: &str| Glyph::Icon(icon::from_name(name).handle());
+    match item {
+        Item::Cpu => Glyph::Icon(cpu()),
+        Item::CpuTemp => Glyph::Icon(temperature()),
+        Item::Ram | Item::Vram(_) => Glyph::Icon(memory()),
+        Item::Swap => named("media-flash-symbolic"),
+        Item::GpuUsage(_) | Item::GpuTemp(_) => named("video-display-symbolic"),
+        Item::DiskUsage(_) => named("drive-harddisk-system-symbolic"),
+        Item::DiskRead(_) => named("document-open-symbolic"),
+        Item::DiskWrite(_) => named("document-save-symbolic"),
+        Item::NvmeTemp(_) => named("drive-harddisk-solidstate-symbolic"),
+        Item::Download(_) => Glyph::Text(fl!("download")),
+        Item::Upload(_) => Glyph::Text(fl!("upload")),
     }
 }
 

@@ -12,7 +12,7 @@
 //! sets the window's height in that mode, which stands for the output's: the popup's room is
 //! measured from it as on the panel. `SYSMON_PREVIEW_COLUMNS=1|2|auto` (default `auto`) sets the
 //! popup's layout; outside screenshot mode `auto` measures the real output, from the same output
-//! events as the applet. `SYSMON_PREVIEW_SETTINGS=1` starts on the settings page. `SYSMON_PREVIEW_LAYOUT=stacked|one-line|compact` picks the panel
+//! events as the applet. `SYSMON_PREVIEW_SETTINGS=1` starts on the settings page. `SYSMON_PREVIEW_LAYOUT=stacked|one-line` picks the panel
 //! button's layout, and `COSMIC_PANEL_SIZE` (`XS`…`XL`) and `COSMIC_PANEL_ANCHOR` (`Left` for a
 //! vertical panel) its panel, as libcosmic reads them. The file is `RGBA`, the width and height as
 //! little-endian `u32`s, then the pixels; `tools/screenshots.py` turns it into a PNG.
@@ -138,8 +138,7 @@ impl Preview {
     fn change_setting(&mut self, change: SettingChange) {
         self.settings = self.models.changed(change, &self.settings);
         self.models.select(&self.settings);
-        let layout = self.settings.layout_for(self.core.applet.is_horizontal());
-        self.summary = PanelSummary::new(&self.stats, &self.settings, layout);
+        self.summary = PanelSummary::new(&self.stats, &self.settings);
         self.choose_columns();
     }
 
@@ -192,17 +191,12 @@ impl cosmic::Application for Preview {
         let settings = PanelSettings {
             layout: match std::env::var("SYSMON_PREVIEW_LAYOUT").as_deref() {
                 Ok("one-line") => Layout::OneLine,
-                Ok("compact") => Layout::Compact,
                 _ => Layout::Stacked,
             },
             popup_layout: popup_layout(),
             ..PanelSettings::default()
         };
-        let summary = PanelSummary::new(
-            &stats,
-            &settings,
-            settings.layout_for(core.applet.is_horizontal()),
-        );
+        let summary = PanelSummary::new(&stats, &settings);
         let room = shot.as_ref().map(|_| shot_room(shot_height()));
         let mut preview = Self {
             core,
@@ -280,7 +274,8 @@ impl cosmic::Application for Preview {
             self.columns,
             columns::page_max_height(self.room),
         ));
-        let button = panel_button(&self.core.applet, &self.settings, Some(&self.summary));
+        let button = panel_button(&self.core.applet, &self.settings, Some(&self.summary))
+            .on_press_down(Message::TogglePopup);
         let panel = widget::container(button)
             .padding([2, 12])
             .class(cosmic::theme::Container::Background);
@@ -584,6 +579,7 @@ fn gpus() -> Vec<GpuSample> {
     vec![
         GpuSample {
             card: "card0".into(),
+            pci: Some("0000:01:00.0".into()),
             nvidia: true,
             name: Some("NVIDIA GeForce RTX 4060 Laptop GPU".into()),
             uuid: Some("GPU-6e9f6c15-581b-4f11-c568-db1698fe7502".into()),
@@ -600,6 +596,7 @@ fn gpus() -> Vec<GpuSample> {
         },
         GpuSample {
             card: "card1".into(),
+            pci: Some("0000:05:00.0".into()),
             name: Some("AMD Radeon 680M".into()),
             status: RuntimeStatus::Active,
             busy: Some(33),

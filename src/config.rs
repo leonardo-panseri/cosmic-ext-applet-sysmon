@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 
 use cosmic::cosmic_config::{self, ConfigGet, ConfigSet, CosmicConfigEntry};
 
-use crate::panel::{Limit, LimitKind, PanelSettings};
+use serde::Deserialize;
+
+use crate::panel::{GpuRef, Item, Limit, LimitKind, NetRef, PanelSettings, Rows};
 use crate::sources::MAX_GPUS;
 
 /// The version of the state's layout.
@@ -129,11 +131,55 @@ const SPLIT_LIMITS: [(&str, [LimitKind; 2]); 2] = [
     ("warn_usage", [LimitKind::Memory, LimitKind::Disk]),
 ];
 
+/// What a panel row showed before the rows held items: the old `top` and `bottom` keys.
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum OldRow {
+    Cpu,
+    Memory,
+    Gpu,
+    Disk,
+    CpuTemp,
+}
+
+impl OldRow {
+    fn item(self) -> Item {
+        match self {
+            Self::Cpu => Item::Cpu,
+            Self::Memory => Item::Ram,
+            Self::Gpu => Item::GpuUsage(GpuRef::Auto),
+            Self::Disk => Item::root_usage(),
+            Self::CpuTemp => Item::CpuTemp,
+        }
+    }
+}
+
+/// The rows the old keys stand for: the `top` row and the download rate if `network` was on,
+/// over the `bottom` row and the upload rate. Each key not stored, or unreadable, has its old
+/// default (CPU, memory, on), so with none stored these are the default rows.
+fn old_rows(handler: &cosmic_config::Config) -> Rows {
+    let row = |key: &str, default: OldRow| handler.get_local::<OldRow>(key).unwrap_or(default);
+    let network = handler.get_local::<bool>("network").unwrap_or(true);
+    let mut top = vec![row("top", OldRow::Cpu).item()];
+    let mut bottom = vec![row("bottom", OldRow::Memory).item()];
+    if network {
+        top.push(Item::Download(NetRef::All));
+        bottom.push(Item::Upload(NetRef::All));
+    }
+    Rows::new(top, bottom)
+}
+
 /// `settings` as read from `handler`, by [`read`] or by the config watch, which knows only the
-/// current keys: each limit not stored yet takes its old single limit, if one is stored, and the
-/// limits are clamped to what the settings page offers. The old keys stay, unread once every
-/// limit they cover has its own.
+/// current keys: until `rows` is stored, the rows are the old `top`, `bottom` and `network` keys'
+/// ([`old_rows`]); each limit not stored yet takes its old single limit, if one is stored; and the
+/// limits are clamped to what the settings page offers. The old keys stay, unread once the keys
+/// that replaced them are stored. (The old `Compact` layout reads as `Stacked`.)
 pub fn settle(handler: &cosmic_config::Config, mut settings: PanelSettings) -> PanelSettings {
+    if matches!(
+        handler.get_local::<Rows>("rows"),
+        Err(cosmic_config::Error::NotFound)
+    ) {
+        settings.rows = old_rows(handler);
+    }
     for (old_key, kinds) in SPLIT_LIMITS {
         let Ok(old) = handler.get_local::<u8>(old_key) else {
             continue;
@@ -168,9 +214,7 @@ fn key(kind: LimitKind) -> &'static str {
 pub fn store(handler: &cosmic_config::Config, stored: &mut PanelSettings, new: &PanelSettings) {
     let results = [
         stored.set_layout(handler, new.layout),
-        stored.set_top(handler, new.top),
-        stored.set_bottom(handler, new.bottom),
-        stored.set_network(handler, new.network),
+        stored.set_rows(handler, new.rows.clone()),
         stored.set_warn_cpu_temp(handler, new.warn_cpu_temp),
         stored.set_warn_gpu_temp(handler, new.warn_gpu_temp),
         stored.set_warn_memory(handler, new.warn_memory),
@@ -196,7 +240,7 @@ pub fn log(what: &str, settings: &PanelSettings) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panel::{Layout, Limit, NvmeLimit, PopupLayout, RowKind};
+    use crate::panel::{DiskRef, Layout, Limit, NvmeLimit, PopupLayout};
 
     const APP_ID: &str = "io.github.example.sysmon-test";
 
@@ -218,9 +262,13 @@ mod tests {
         let mut stored = read(&handler);
         let changed = PanelSettings {
             layout: Layout::OneLine,
-            top: RowKind::Gpu,
-            bottom: RowKind::CpuTemp,
-            network: false,
+            rows: Rows::new(
+                vec![
+                    Item::GpuTemp(GpuRef::Pci("0000:01:00.0".into())),
+                    Item::DiskRead(DiskRef::All),
+                ],
+                vec![Item::DiskUsage("/mnt/storage".into())],
+            ),
             warn_cpu_temp: Limit::on(78),
             warn_gpu_temp: Limit::off(80),
             warn_memory: Limit::on(95),
@@ -241,9 +289,7 @@ mod tests {
         let folder = dir.path().join("cosmic").join(APP_ID).join("v1");
         for key in [
             "layout",
-            "top",
-            "bottom",
-            "network",
+            "rows",
             "warn_cpu_temp",
             "warn_gpu_temp",
             "warn_memory",
@@ -263,6 +309,11 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(folder.join("popup_layout")).unwrap(),
             "TwoColumns"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join("rows")).unwrap(),
+            "([\n    GpuTemp(Pci(\"0000:01:00.0\")),\n    DiskRead(All),\n], [\n    \
+             DiskUsage(\"/mnt/storage\"),\n])"
         );
 
         assert_eq!(read(&open(&dir)), changed);
@@ -353,6 +404,98 @@ mod tests {
         assert!(!folder.join("warn_memory").exists());
     }
 
+    /// The rows of the settings read with the old keys `keys` stored.
+    fn migrated(keys: &[(&str, &str)]) -> PanelSettings {
+        let dir = tempfile::tempdir().unwrap();
+        for (key, value) in keys {
+            write_key(&dir, key, value);
+        }
+        read(&open(&dir))
+    }
+
+    #[test]
+    fn the_old_rows_become_items_with_the_rates_beside_them() {
+        let settings = migrated(&[("top", "Gpu"), ("bottom", "Disk")]);
+        assert_eq!(
+            settings.rows,
+            Rows::new(
+                vec![Item::GpuUsage(GpuRef::Auto), Item::Download(NetRef::All)],
+                vec![Item::root_usage(), Item::Upload(NetRef::All)],
+            )
+        );
+        assert_eq!(settings.layout, Layout::Stacked);
+    }
+
+    #[test]
+    fn the_old_rows_without_network_rates_hold_one_item_each() {
+        let settings = migrated(&[
+            ("layout", "OneLine"),
+            ("top", "CpuTemp"),
+            ("network", "false"),
+        ]);
+        assert_eq!(
+            settings.rows,
+            Rows::new(vec![Item::CpuTemp], vec![Item::Ram])
+        );
+        assert_eq!(settings.layout, Layout::OneLine);
+    }
+
+    #[test]
+    fn compact_becomes_stacked_with_the_same_rows() {
+        let settings = migrated(&[("layout", "Compact"), ("bottom", "Cpu")]);
+        assert_eq!(settings.layout, Layout::Stacked);
+        assert_eq!(
+            settings.rows,
+            Rows::new(
+                vec![Item::Cpu, Item::Download(NetRef::All)],
+                vec![Item::Cpu, Item::Upload(NetRef::All)],
+            )
+        );
+    }
+
+    #[test]
+    fn an_unreadable_old_row_keeps_its_old_default() {
+        let settings = migrated(&[("top", "Fan"), ("network", "false")]);
+        assert_eq!(settings.rows, Rows::new(vec![Item::Cpu], vec![Item::Ram]));
+    }
+
+    #[test]
+    fn stored_rows_win_over_the_old_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        write_key(&dir, "top", "Gpu");
+        write_key(&dir, "network", "false");
+        let handler = open(&dir);
+        let mut stored = read(&handler);
+        assert_eq!(
+            stored.rows,
+            Rows::new(vec![Item::GpuUsage(GpuRef::Auto)], vec![Item::Ram])
+        );
+        let changed = PanelSettings {
+            rows: Rows::new(vec![Item::Swap], vec![]),
+            ..stored.clone()
+        };
+        store(&handler, &mut stored, &changed);
+        assert_eq!(read(&open(&dir)).rows, Rows::new(vec![Item::Swap], vec![]));
+        // Through the config watch too.
+        let watched = PanelSettings::get_entry(&handler).unwrap_or_else(|(_, s)| s);
+        assert_eq!(settle(&handler, watched).rows, changed.rows);
+    }
+
+    #[test]
+    fn the_config_watch_reads_the_old_rows_until_rows_are_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        write_key(&dir, "bottom", "CpuTemp");
+        let handler = open(&dir);
+        let watched = PanelSettings::get_entry(&handler).unwrap_or_else(|(_, s)| s);
+        assert_eq!(watched.rows, Rows::default());
+        assert_eq!(
+            settle(&handler, watched)
+                .rows
+                .row(crate::panel::Row::Bottom),
+            [Item::CpuTemp, Item::Upload(NetRef::All)]
+        );
+    }
+
     const UUID: &str = "GPU-6e9f6c15-581b-4f11-c568-db1698fe7502";
 
     #[test]
@@ -401,22 +544,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().join("cosmic").join(APP_ID).join("v1");
         std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(folder.join("layout"), "Compact").unwrap();
+        std::fs::write(folder.join("layout"), "OneLine").unwrap();
         std::fs::write(folder.join("warn_cpu_temp"), "(on: true, at: 200)").unwrap();
         std::fs::write(folder.join("warn_memory"), "(on: false, at: 30)").unwrap();
         std::fs::write(folder.join("warn_vram"), "(on: true)").unwrap();
         std::fs::write(folder.join("warn_nvme"), "(on: true, at: Some(72))").unwrap();
-        std::fs::write(folder.join("top"), "Fan").unwrap();
+        std::fs::write(folder.join("rows"), "([Cpu, Fan], [])").unwrap();
         std::fs::write(folder.join("popup_layout"), "Wide").unwrap();
         let settings = read(&open(&dir));
-        assert_eq!(settings.layout, Layout::Compact);
+        assert_eq!(settings.layout, Layout::OneLine);
         // Out of the page's range: clamped. Not a `Limit`: the default.
         assert_eq!(settings.warn_cpu_temp, Limit::on(110));
         assert_eq!(settings.warn_memory, Limit::off(50));
         // A field missing: the default.
         assert_eq!(settings.warn_vram, PanelSettings::default().warn_vram);
         assert_eq!(settings.warn_nvme.at, Some(72));
-        assert_eq!(settings.top, RowKind::Cpu);
+        // Rows stored but unreadable: the default rows, not the old keys'.
+        assert_eq!(settings.rows, Rows::default());
         assert_eq!(settings.popup_layout, PopupLayout::Auto);
     }
 }

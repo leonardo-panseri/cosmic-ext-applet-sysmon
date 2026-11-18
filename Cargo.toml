@@ -30,6 +30,8 @@ zbus = { version = "6.3", default-features = false, features = ["proxy", "tokio"
 [dev-dependencies]
 # Already in the tree; a scratch config directory for the cosmic-config round trip.
 tempfile = "3"
+# Already in the tree through cosmic-config; checks how the panel button's rows are stored.
+ron = "0.12"
 
 [dependencies.i18n-embed]
 version = "0.16"

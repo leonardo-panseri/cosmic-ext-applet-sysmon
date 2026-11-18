@@ -3,19 +3,21 @@
 //! Hysteresis for the closed tier (D6): which new [`PanelSummary`] is worth a panel redraw.
 //! Each panel redraw costs about 24 wakeups, and with CPU load and network rates shown almost
 //! every sample changes some text, so while the popup is closed a summary is sent only when a
-//! shown value moved enough from the value **last sent**, which is what the panel shows:
+//! shown value moved enough from the value **last sent**, which is what the panel shows. Each
+//! item follows the rule of its kind of value ([`ValueKind`]):
 //!
-//! - **Percentages** (CPU, memory, GPU, disk): by at least 2 points of the shown whole number.
+//! - **Percentages** (CPU, RAM, swap, GPU, VRAM, disk usage): by at least 2 points of the shown
+//!   whole number.
 //! - **Temperatures**: by at least 1 °C of the shown whole number, so any change of their text.
-//! - **Network rates**: by one display step, compared as shown, in bytes per second. While both
+//! - **Rates** (network and disk): by one display step, compared as shown, in bytes per second. While both
 //!   the new and the sent rate are below 16 KiB/s (`"16K"`), background chatter, the rate is held
 //!   whatever the ratio, `"0B"` included. Otherwise the higher must be at least 1.5 times the lower,
 //!   either way: `"100K"` → `"150K"` or `"66K"` is a step, `"149K"` or `"67K"` isn't, nor is a
 //!   change of unit alone (`"999K"` → `"1.0M"`); across the floor, `"4.0K"` → `"40K"` is a step,
 //!   `"12K"` → `"17K"` isn't.
-//! - **Always**: a value appearing or disappearing, any change of the warnings (which also carry
-//!   the tooltip's values) or of the card the GPU row shows, and any text this module can't read
-//!   back.
+//! - **Always**: an item or a value appearing or disappearing, any change of the warnings (which
+//!   also carry the tooltip's values) or of what takes the warning colour, a GPU item switching
+//!   cards, and any text this module can't read back.
 //!
 //! A held value is sent anyway once the summary last sent is [`CATCH_UP`] old, so the panel never
 //! shows a wrong value for long. Settings and orientation changes, and every sample while the
@@ -24,7 +26,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::PanelSummary;
+use super::{PanelSummary, ShownItem, ValueKind};
 
 /// How long a shown value may lag behind, under the thresholds of
 /// [`PanelSummary::moved_enough`], before it is sent anyway.
@@ -67,16 +69,26 @@ impl PanelSummary {
     /// be worth a redraw while the popup is closed.
     #[must_use]
     pub fn moved_enough(&self, last_sent: &Self) -> bool {
-        let values_moved = [
-            (&self.top, &last_sent.top),
-            (&self.bottom, &last_sent.bottom),
-            (&self.down, &last_sent.down),
-            (&self.up, &last_sent.up),
-        ]
-        .into_iter()
-        .any(|(new, sent)| value_moved(new.as_deref(), sent.as_deref()));
-        values_moved || self.gpu_card != last_sent.gpu_card || self.warnings != last_sent.warnings
+        let row_moved = |new: &[ShownItem], sent: &[ShownItem]| {
+            new.len() != sent.len() || new.iter().zip(sent).any(|(n, s)| item_moved(n, s))
+        };
+        row_moved(&self.top, &last_sent.top)
+            || row_moved(&self.bottom, &last_sent.bottom)
+            || self.button_warns != last_sent.button_warns
+            || self.warnings != last_sent.warnings
     }
+}
+
+/// Whether the item `new` moved enough from `sent`, the item in its place last sent.
+fn item_moved(new: &ShownItem, sent: &ShownItem) -> bool {
+    new.item != sent.item
+        || new.warns != sent.warns
+        || new.card != sent.card
+        || value_moved(
+            new.item.value_kind(),
+            new.value.as_deref(),
+            sent.value.as_deref(),
+        )
 }
 
 /// A panel value read back from its text, as [`super::format`] wrote it.
@@ -115,15 +127,19 @@ impl Shown {
     }
 }
 
-/// Whether a shown value moved enough from `sent` to `new`, by the rules of the module's
-/// documentation.
-fn value_moved(new: Option<&str>, sent: Option<&str>) -> bool {
+/// Whether a shown value of `kind` moved enough from `sent` to `new`, by the rules of the
+/// module's documentation.
+fn value_moved(kind: ValueKind, new: Option<&str>, sent: Option<&str>) -> bool {
     match (new, sent) {
         (None, None) => false,
         (Some(new), Some(sent)) if new == sent => false,
-        (Some(new), Some(sent)) => match (Shown::parse(new), Shown::parse(sent)) {
-            (Some(Shown::Percent(new)), Some(Shown::Percent(sent))) => (new - sent).abs() >= 2,
-            (Some(Shown::Rate(new)), Some(Shown::Rate(sent))) => rate_stepped(new, sent),
+        (Some(new), Some(sent)) => match (kind, Shown::parse(new), Shown::parse(sent)) {
+            (ValueKind::Percent, Some(Shown::Percent(new)), Some(Shown::Percent(sent))) => {
+                (new - sent).abs() >= 2
+            }
+            (ValueKind::Rate, Some(Shown::Rate(new)), Some(Shown::Rate(sent))) => {
+                rate_stepped(new, sent)
+            }
             _ => true,
         },
         _ => true,
@@ -140,16 +156,33 @@ fn rate_stepped(new: u64, sent: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panel::Warning;
+    use crate::panel::{DiskRef, GpuRef, Item, NetRef, Warning};
 
-    /// A summary showing `top` over `bottom`, with no rates and no warnings.
+    fn shown(item: Item, value: &str) -> ShownItem {
+        ShownItem {
+            item,
+            value: Some(value.into()),
+            warns: false,
+            card: None,
+        }
+    }
+
+    /// A summary showing CPU load `top` over RAM `bottom`, with no warnings.
     fn rows(top: &str, bottom: &str) -> PanelSummary {
         PanelSummary {
-            top: Some(top.into()),
-            bottom: Some(bottom.into()),
-            down: None,
-            up: None,
-            gpu_card: None,
+            top: vec![shown(Item::Cpu, top)],
+            bottom: vec![shown(Item::Ram, bottom)],
+            button_warns: false,
+            warnings: vec![],
+        }
+    }
+
+    /// A summary showing only `item` at `value`.
+    fn one(item: Item, value: &str) -> PanelSummary {
+        PanelSummary {
+            top: vec![shown(item, value)],
+            bottom: vec![],
+            button_warns: false,
             warnings: vec![],
         }
     }
@@ -166,26 +199,49 @@ mod tests {
     }
 
     #[test]
-    fn a_temperature_moves_enough_at_one_shown_degree() {
-        let sent = rows("12%", "62°C");
-        assert!(!rows("12%", "62°C").moved_enough(&sent));
-        assert!(rows("12%", "63°C").moved_enough(&sent));
-        assert!(rows("12%", "61°C").moved_enough(&sent));
+    fn every_percentage_item_follows_the_percentage_rule() {
+        for item in [
+            Item::Swap,
+            Item::GpuUsage(GpuRef::Auto),
+            Item::Vram(GpuRef::Pci("0000:01:00.0".into())),
+            Item::DiskUsage("/mnt/storage".into()),
+        ] {
+            let sent = one(item.clone(), "50%");
+            assert!(!one(item.clone(), "51%").moved_enough(&sent), "{item:?}");
+            assert!(one(item.clone(), "52%").moved_enough(&sent), "{item:?}");
+        }
     }
 
     #[test]
-    fn a_row_showing_another_kind_of_value_always_moves() {
-        // 62 % and 62 °C are different rows, say after a settings change.
-        assert!(rows("12%", "62%").moved_enough(&rows("12%", "62°C")));
+    fn a_temperature_moves_enough_at_one_shown_degree() {
+        for item in [
+            Item::CpuTemp,
+            Item::GpuTemp(GpuRef::Auto),
+            Item::NvmeTemp(crate::panel::DiskId {
+                model: "Samsung SSD".into(),
+                name: "nvme0n1".into(),
+            }),
+        ] {
+            let sent = one(item.clone(), "62°C");
+            assert!(!one(item.clone(), "62°C").moved_enough(&sent), "{item:?}");
+            assert!(one(item.clone(), "63°C").moved_enough(&sent), "{item:?}");
+            assert!(one(item.clone(), "61°C").moved_enough(&sent), "{item:?}");
+        }
     }
 
-    /// A summary showing the rates `down` and `up`, and the rows of [`rows`].
+    #[test]
+    fn another_item_in_a_place_always_moves() {
+        // 62 % and 62 °C are different items, say after a settings change.
+        assert!(one(Item::Cpu, "62%").moved_enough(&one(Item::CpuTemp, "62°C")));
+        assert!(one(Item::Cpu, "62%").moved_enough(&one(Item::Ram, "62%")));
+    }
+
+    /// A summary showing the rates `down` and `up`, after the items of [`rows`].
     fn rates(down: &str, up: &str) -> PanelSummary {
-        PanelSummary {
-            down: Some(down.into()),
-            up: Some(up.into()),
-            ..rows("12%", "45%")
-        }
+        let mut summary = rows("12%", "45%");
+        summary.top.push(shown(Item::Download(NetRef::All), down));
+        summary.bottom.push(shown(Item::Upload(NetRef::All), up));
+        summary
     }
 
     /// Whether the download rate moved enough from `sent` to `new`.
@@ -238,17 +294,24 @@ mod tests {
     }
 
     #[test]
-    fn a_value_appearing_or_disappearing_always_moves() {
+    fn a_disk_rate_follows_the_rate_rule() {
+        let item = Item::DiskWrite(DiskRef::All);
+        let sent = one(item.clone(), "100K");
+        assert!(!one(item.clone(), "149K").moved_enough(&sent));
+        assert!(one(item.clone(), "150K").moved_enough(&sent));
+        assert!(!one(item.clone(), "15K").moved_enough(&one(item, "0B")));
+    }
+
+    #[test]
+    fn a_value_or_an_item_appearing_or_disappearing_always_moves() {
         let sent = rates("340K", "1.0K");
         let no_rates = rows("12%", "45%");
         assert!(no_rates.moved_enough(&sent));
         assert!(sent.moved_enough(&no_rates));
-        let no_bottom = PanelSummary {
-            bottom: None,
-            ..rows("12%", "45%")
-        };
-        assert!(no_bottom.moved_enough(&rows("12%", "45%")));
-        assert!(rows("12%", "45%").moved_enough(&no_bottom));
+        let mut missing = rows("12%", "45%");
+        missing.bottom[0].value = None;
+        assert!(missing.moved_enough(&rows("12%", "45%")));
+        assert!(rows("12%", "45%").moved_enough(&missing));
     }
 
     #[test]
@@ -272,12 +335,25 @@ mod tests {
             ..warns.clone()
         };
         assert!(hotter.moved_enough(&warns));
-        // Another GPU on the GPU row changes which warnings colour it.
-        let other_gpu = PanelSummary {
-            gpu_card: Some("card1".into()),
-            ..sent.clone()
+        // What takes the colour.
+        let mut coloured = warns.clone();
+        coloured.bottom[0].warns = true;
+        assert!(coloured.moved_enough(&warns));
+        let button = PanelSummary {
+            button_warns: true,
+            ..warns.clone()
         };
-        assert!(other_gpu.moved_enough(&sent));
+        assert!(button.moved_enough(&warns));
+    }
+
+    #[test]
+    fn an_auto_gpu_switching_cards_always_moves() {
+        let item = Item::GpuUsage(GpuRef::Auto);
+        let mut sent = one(item.clone(), "33%");
+        sent.top[0].card = Some("card1".into());
+        let mut other = one(item, "34%");
+        other.top[0].card = Some("card0".into());
+        assert!(other.moved_enough(&sent));
     }
 
     #[test]

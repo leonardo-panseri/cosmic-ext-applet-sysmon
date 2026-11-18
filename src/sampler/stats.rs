@@ -68,6 +68,9 @@ pub struct DriveTemp {
 pub struct GpuSample {
     /// The DRM card, e.g. `card1`.
     pub card: String,
+    /// Its PCI address, `0000:01:00.0`, from the name of its `device` link's target: for
+    /// NVIDIA also the procfs bus id. `None` for a card not on PCI.
+    pub pci: Option<String>,
     /// Driven by the NVIDIA driver; listed first (§2.2).
     pub nvidia: bool,
     /// The model: from NVIDIA procfs, which never wakes the card, or for AMD from sysfs and

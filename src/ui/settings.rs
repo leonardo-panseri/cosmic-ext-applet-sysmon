@@ -18,8 +18,7 @@ use crate::app::Message;
 use crate::fl;
 use crate::launch::Launcher;
 use crate::panel::{
-    DEFAULT_PROCESS_MONITOR, Layout, LimitKind, NVME_STEP_FROM, PanelSettings, PopupLayout,
-    RowKind, Unit,
+    DEFAULT_PROCESS_MONITOR, Layout, LimitKind, NVME_STEP_FROM, PanelSettings, PopupLayout, Unit,
 };
 
 /// A text field of the settings page.
@@ -34,13 +33,8 @@ pub enum Field {
 pub enum SettingChange {
     /// A segment of the layout choice.
     Layout(Entity),
-    /// A segment of the top row's choice.
-    Top(Entity),
-    /// A segment of the bottom row's choice.
-    Bottom(Entity),
     /// A segment of the popup's columns.
     PopupLayout(Entity),
-    Network(bool),
     /// A warning turned on or off.
     WarnOn(LimitKind, bool),
     /// A limit set with − or +.
@@ -62,8 +56,6 @@ const MAX_COMMAND: usize = 1024;
 /// the settings, and the fields' drafts.
 pub struct SettingsModels {
     layout: SingleSelectModel,
-    top: SingleSelectModel,
-    bottom: SingleSelectModel,
     popup_layout: SingleSelectModel,
     drafts: HashMap<Field, String>,
 }
@@ -74,8 +66,6 @@ impl SettingsModels {
     pub fn new(settings: &PanelSettings) -> Self {
         let mut models = Self {
             layout: model(&Layout::ALL, layout_label),
-            top: model(&RowKind::ALL, row_label),
-            bottom: model(&RowKind::ALL, row_label),
             popup_layout: model(&PopupLayout::ALL, popup_layout_label),
             drafts: HashMap::new(),
         };
@@ -86,8 +76,6 @@ impl SettingsModels {
     /// Selects `settings` in every control, as after a change made elsewhere. Drafts stay.
     pub fn select(&mut self, settings: &PanelSettings) {
         select(&mut self.layout, &settings.layout);
-        select(&mut self.top, &settings.top);
-        select(&mut self.bottom, &settings.bottom);
         select(&mut self.popup_layout, &settings.popup_layout);
     }
 
@@ -118,17 +106,10 @@ impl SettingsModels {
             SettingChange::Layout(item) => {
                 settings.layout = value(&self.layout, item).unwrap_or(settings.layout);
             }
-            SettingChange::Top(item) => {
-                settings.top = value(&self.top, item).unwrap_or(settings.top);
-            }
-            SettingChange::Bottom(item) => {
-                settings.bottom = value(&self.bottom, item).unwrap_or(settings.bottom);
-            }
             SettingChange::PopupLayout(item) => {
                 settings.popup_layout =
                     value(&self.popup_layout, item).unwrap_or(settings.popup_layout);
             }
-            SettingChange::Network(network) => settings.network = network,
             SettingChange::WarnOn(kind, on) => match settings.limit_mut(kind) {
                 Some(limit) => limit.on = on,
                 None => settings.warn_nvme.on = on,
@@ -253,17 +234,6 @@ fn layout_label(layout: Layout) -> String {
     match layout {
         Layout::Stacked => fl!("layout-stacked"),
         Layout::OneLine => fl!("layout-one-line"),
-        Layout::Compact => fl!("layout-compact"),
-    }
-}
-
-fn row_label(kind: RowKind) -> String {
-    match kind {
-        RowKind::Cpu => fl!("cpu"),
-        RowKind::Memory => fl!("memory"),
-        RowKind::Gpu => fl!("gpu"),
-        RowKind::Disk => fl!("disk"),
-        RowKind::CpuTemp => fl!("row-cpu-temp"),
     }
 }
 
@@ -322,26 +292,12 @@ pub fn view<'a>(
                 ],
             )
         };
-    let network = settings::item::builder(fl!("setting-network"))
-        .description(fl!("setting-network-description"))
-        .control(
-            widget::toggler(settings.network)
-                .on_toggle(|on| Message::Setting(SettingChange::Network(on))),
-        );
     let limits = LimitKind::ALL
         .into_iter()
         .map(|kind| limit_item(models, settings, kind))
         .collect();
     let panel_button = vec![
         choice(fl!("setting-layout"), &models.layout, SettingChange::Layout),
-        choice(fl!("setting-top-row"), &models.top, SettingChange::Top),
-        choice(
-            fl!("setting-bottom-row"),
-            &models.bottom,
-            SettingChange::Bottom,
-        ),
-        widget::divider::horizontal::default().into(),
-        network.into(),
         widget::divider::horizontal::default().into(),
         process_monitor(models, settings),
     ];
@@ -526,20 +482,14 @@ mod tests {
     #[test]
     fn the_controls_start_on_the_settings() {
         let settings = PanelSettings {
-            layout: Layout::Compact,
-            bottom: RowKind::Disk,
+            layout: Layout::OneLine,
             popup_layout: PopupLayout::OneColumn,
             ..PanelSettings::default()
         };
         let models = SettingsModels::new(&settings);
         assert_eq!(
             value(&models.layout, models.layout.active()),
-            Some(Layout::Compact)
-        );
-        assert_eq!(value(&models.top, models.top.active()), Some(RowKind::Cpu));
-        assert_eq!(
-            value(&models.bottom, models.bottom.active()),
-            Some(RowKind::Disk)
+            Some(Layout::OneLine)
         );
         assert_eq!(
             value(&models.popup_layout, models.popup_layout.active()),
@@ -557,11 +507,6 @@ mod tests {
         models.select(&settings);
         assert_eq!(models.layout.active(), one_line);
 
-        let gpu = entity(&models.top, &RowKind::Gpu);
-        let settings = models.changed(SettingChange::Top(gpu), &settings);
-        let temp = entity(&models.bottom, &RowKind::CpuTemp);
-        let settings = models.changed(SettingChange::Bottom(temp), &settings);
-        let settings = models.changed(SettingChange::Network(false), &settings);
         let two = entity(&models.popup_layout, &PopupLayout::TwoColumns);
         let settings = models.changed(SettingChange::PopupLayout(two), &settings);
         let settings = models.changed(SettingChange::WarnAt(LimitKind::CpuTemp, 70), &settings);
@@ -572,9 +517,6 @@ mod tests {
             settings,
             PanelSettings {
                 layout: Layout::OneLine,
-                top: RowKind::Gpu,
-                bottom: RowKind::CpuTemp,
-                network: false,
                 popup_layout: PopupLayout::TwoColumns,
                 warn_cpu_temp: Limit::on(70),
                 warn_swap: Limit::on(50),

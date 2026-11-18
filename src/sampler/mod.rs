@@ -72,7 +72,7 @@ fn run(
         let now = Instant::now();
         let deadline = core.deadline(now);
         let update = if deadline <= now {
-            let update = core.sample(readers.read(now, core.wants()), now);
+            let update = core.sample(readers.read(now, &core.wants()), now);
             if probe_client::debug_open()
                 && let Some(update) = &update
             {

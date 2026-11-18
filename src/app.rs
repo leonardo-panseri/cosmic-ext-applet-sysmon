@@ -40,8 +40,6 @@ pub struct AppModel {
     models: SettingsModels,
     /// The sampler's control channel, once it has started.
     sampler: Option<SamplerHandle>,
-    /// The panel orientation last sent to the sampler: `true` for horizontal.
-    sent_horizontal: Option<bool>,
     /// What the panel button shows, including the active warnings; `None` before the first sample.
     panel: Option<PanelSummary>,
     /// The last sample with its history, for the popup.
@@ -85,19 +83,6 @@ impl AppModel {
     fn popup_changed(&self) {
         if let Some(sampler) = &self.sampler {
             sampler.send(Control::PopupOpen(self.popup.is_some()));
-        }
-    }
-
-    /// Tells the sampler the panel's orientation if it hasn't been told yet or it changed: a
-    /// vertical panel shows only the top row, so the sampler builds its summaries for that (D6)
-    /// and leaves out NVML for a hidden GPU row (D2).
-    fn sync_orientation(&mut self) {
-        let horizontal = self.core.applet.is_horizontal();
-        if let Some(sampler) = &self.sampler
-            && self.sent_horizontal != Some(horizontal)
-        {
-            sampler.send(Control::Horizontal(horizontal));
-            self.sent_horizontal = Some(horizontal);
         }
     }
 
@@ -204,7 +189,6 @@ impl cosmic::Application for AppModel {
             settings,
             config,
             sampler: None,
-            sent_horizontal: None,
             panel: None,
             stats: None,
             last_sample: None,
@@ -232,8 +216,10 @@ impl cosmic::Application for AppModel {
         let applet = &self.core.applet;
         // The button takes only left clicks, so a right click reaches the mouse area. The mouse
         // area lays out as its content, so it changes neither the size nor the hover highlight.
-        let button = widget::mouse_area(panel_button(applet, &self.settings, self.panel.as_ref()))
-            .on_right_press(Message::OpenProcessMonitor);
+        // On press, not release, like COSMIC's own applets.
+        let button = panel_button(applet, &self.settings, self.panel.as_ref())
+            .on_press_down(Message::TogglePopup);
+        let button = widget::mouse_area(button).on_right_press(Message::OpenProcessMonitor);
         // The tooltip lists the warnings. It only watches the cursor and passes every event on,
         // so both clicks still reach the button and the mouse area. It is always there, only
         // without a surface to show when there is nothing to say, so the widget tree keeps its
@@ -273,7 +259,6 @@ impl cosmic::Application for AppModel {
 
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         redraws::count(redraws::Event::Update);
-        self.sync_orientation();
         match message {
             Message::TogglePopup => {
                 if let Some(id) = self.popup.take() {
@@ -323,8 +308,6 @@ impl cosmic::Application for AppModel {
                 // started. It started with the stored settings; a change since is sent here.
                 handle.send(Control::Settings(self.settings.clone()));
                 self.sampler = Some(handle);
-                self.sent_horizontal = None;
-                self.sync_orientation();
                 self.popup_changed();
             }
             Message::Sampled(update) => {

@@ -53,12 +53,38 @@ const MAX_DIR_ENTRIES: usize = 256;
 const NVML_HOLD: Duration = IDLE_INTERVAL.saturating_add(Duration::from_secs(5));
 
 /// What the current tier reads beyond the closed tier's files.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Wants {
     /// The top processes: the popup is open.
     pub processes: bool,
-    /// NVIDIA stats: popup open, `gpu` on the panel button, or an NVIDIA warning on (D2).
-    pub nvml: bool,
+    /// Which NVIDIA cards' stats (D2).
+    pub nvml: Nvml,
+}
+
+/// Which NVIDIA cards someone looks at, so NVML is asked while one of them is awake, with the
+/// back-off of ADR 0003. Whatever is wanted, a suspended card is never asked about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Nvml {
+    /// None.
+    #[default]
+    Off,
+    /// Any: the popup is open, an NVIDIA warning is on, or the panel button shows a GPU item
+    /// whose GPU is Auto.
+    Any,
+    /// Only those at these PCI addresses: the panel button shows GPU items for them.
+    Cards(Vec<String>),
+}
+
+impl Nvml {
+    /// Whether `gpu`'s stats are wanted, if it is an NVIDIA card.
+    #[must_use]
+    pub fn covers(&self, gpu: &GpuSample) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Any => true,
+            Self::Cards(cards) => gpu.pci.as_ref().is_some_and(|pci| cards.contains(pci)),
+        }
+    }
 }
 
 /// A file kept open and reread from the start.
@@ -249,6 +275,7 @@ impl Card {
             });
         let mut gpu = GpuSample {
             card: self.name.clone(),
+            pci: self.pci(),
             nvidia: self.nvidia.is_some(),
             name: self.model.clone(),
             uuid: self.nvidia.as_ref().and_then(|n| n.uuid.clone()),
@@ -284,6 +311,16 @@ impl Card {
             gpu.celsius = Some(c);
         }
         gpu
+    }
+
+    /// The PCI address: the name of the device directory, which discovery already resolved, for
+    /// a device on PCI. Nothing is read.
+    fn pci(&self) -> Option<String> {
+        if let Some(nvidia) = &self.nvidia {
+            return Some(nvidia.bus_id.clone());
+        }
+        let name = self.device.file_name()?.to_string_lossy();
+        sysmon_probe::nvidia::is_bus_id(&name).then(|| name.to_ascii_lowercase())
     }
 
     /// Looks at the driver, and names an AMD card. Only called while the card may be queried
@@ -419,7 +456,7 @@ impl Readers {
     }
 
     /// Reads one sample at `now`, with what the tier `wants`.
-    pub fn read(&mut self, now: Instant, wants: Wants) -> Sample {
+    pub fn read(&mut self, now: Instant, wants: &Wants) -> Sample {
         let due = self
             .discovered_at
             .is_none_or(|at| now.duration_since(at) >= REDISCOVER_EVERY);
@@ -478,17 +515,21 @@ impl Readers {
         if wants.processes {
             sample.processes = self.probe.processes();
         }
-        self.nvidia(now, wants.nvml, &mut sample.gpus);
+        self.nvidia(now, &wants.nvml, &mut sample.gpus);
         sample
     }
 
     /// Fills in the NVIDIA cards of `gpus`: asks the probe when the back-off says so, shows the
     /// last sample on the ticks in between, and the cached VRAM size while suspended (D4).
-    fn nvidia(&mut self, now: Instant, wanted: bool, gpus: &mut [GpuSample]) {
+    /// Only a wanted card being awake lets the probe be asked; the probe itself also asks
+    /// nothing unless every NVIDIA card is awake (ADR 0003).
+    fn nvidia(&mut self, now: Instant, wanted: &Nvml, gpus: &mut [GpuSample]) {
         let tick = Tick {
             now,
-            awake: gpus.iter().any(|g| g.nvidia && g.status.may_query()),
-            wanted,
+            awake: gpus
+                .iter()
+                .any(|g| g.nvidia && g.status.may_query() && wanted.covers(g)),
+            wanted: *wanted != Nvml::Off,
         };
         if self.nvml.due(tick) {
             let backed_off = self.nvml.backed_off();
@@ -832,7 +873,7 @@ mod tests {
     /// The open tier without NVML, so these tests never ask about this machine's GPU.
     const OPEN: Wants = Wants {
         processes: true,
-        nvml: false,
+        nvml: Nvml::Off,
     };
 
     /// A probe whose one NVIDIA card at `0000:01:00.0` answers with `util`; counts the asks.
@@ -880,7 +921,7 @@ mod tests {
             uuid: Some("GPU-1".into()),
         });
         readers.cards.push(card);
-        let tick = |readers: &mut Readers, at: Instant, wanted: bool| {
+        let tick = |readers: &mut Readers, at: Instant, wanted: &Nvml| {
             let mut failed = false;
             let mut gpus: Vec<_> = readers
                 .cards
@@ -894,20 +935,20 @@ mod tests {
         let s = Duration::from_secs;
 
         // Suspended and never seen awake: only `Suspended`, and nothing asked.
-        let gpu = tick(&mut readers, t0, true);
+        let gpu = tick(&mut readers, t0, &Nvml::Any);
         assert!(gpu.suspended() && gpu.nvidia);
         assert_eq!((gpu.vram_used, gpu.vram_total), (None, None));
         assert_eq!(*probe.asked.lock().unwrap(), 0);
 
         // Awake but nobody looking: nothing asked either.
         std::fs::write(&status, "active\n").unwrap();
-        let gpu = tick(&mut readers, t0 + s(2), false);
+        let gpu = tick(&mut readers, t0 + s(2), &Nvml::Off);
         assert_eq!(gpu.busy, None);
         assert_eq!(*probe.asked.lock().unwrap(), 0);
 
         // Awake and looked at: NVML's numbers, the procfs name.
         *probe.util.lock().unwrap() = 40;
-        let gpu = tick(&mut readers, t0 + s(4), true);
+        let gpu = tick(&mut readers, t0 + s(4), &Nvml::Any);
         assert_eq!(
             (
                 gpu.busy,
@@ -932,21 +973,63 @@ mod tests {
         // Idle: three samples, then the last one is shown on the skipped ticks.
         *probe.util.lock().unwrap() = 0;
         for i in 0..4 {
-            tick(&mut readers, t0 + s(6 + 2 * i), true);
+            tick(&mut readers, t0 + s(6 + 2 * i), &Nvml::Any);
         }
         assert_eq!(*probe.asked.lock().unwrap(), 4);
-        let gpu = tick(&mut readers, t0 + s(14), true);
+        let gpu = tick(&mut readers, t0 + s(14), &Nvml::Any);
         assert_eq!(gpu.busy, Some(0));
         assert_eq!(*probe.asked.lock().unwrap(), 4);
 
         // Suspended: `0 / 8G` from the cache, and the held sample is dropped.
         std::fs::write(&status, "suspended\n").unwrap();
-        let gpu = tick(&mut readers, t0 + s(16), true);
+        let gpu = tick(&mut readers, t0 + s(16), &Nvml::Any);
         assert_eq!(
             (gpu.busy, gpu.vram_used, gpu.vram_total),
             (None, Some(0), Some(8188 << 20))
         );
         assert_eq!(*probe.asked.lock().unwrap(), 4);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_gpu_item_for_one_card_asks_nvml_only_while_that_card_is_awake() {
+        let dir = std::env::temp_dir().join(format!("sysmon-readers-one-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("power")).unwrap();
+        let status = dir.join("power/runtime_status");
+        std::fs::write(&status, "suspended\n").unwrap();
+        let probe = FakeNvidia::default();
+        let mut readers = Readers::new(Box::new(probe.clone()), VramCache::default());
+        let mut card = Card::new("card0".into(), dir.clone());
+        card.nvidia = Some(NvidiaIds {
+            bus_id: "0000:01:00.0".into(),
+            uuid: None,
+        });
+        readers.cards.push(card);
+        let tick = |readers: &mut Readers, at: Instant, wanted: &Nvml| {
+            let mut failed = false;
+            let mut gpus: Vec<_> = readers
+                .cards
+                .iter_mut()
+                .map(|c| c.sample(&mut failed))
+                .collect();
+            readers.nvidia(at, wanted, &mut gpus);
+            gpus.remove(0)
+        };
+        let t0 = Instant::now();
+        let this = Nvml::Cards(vec!["0000:01:00.0".into()]);
+        let other = Nvml::Cards(vec!["0000:05:00.0".into()]);
+        // Suspended: nothing asked, whatever is wanted. The PCI address needs no read.
+        let gpu = tick(&mut readers, t0, &this);
+        assert_eq!(gpu.pci.as_deref(), Some("0000:01:00.0"));
+        assert_eq!(*probe.asked.lock().unwrap(), 0);
+        std::fs::write(&status, "active\n").unwrap();
+        // Awake, but only another card is on the panel button.
+        tick(&mut readers, t0 + Duration::from_secs(2), &other);
+        assert_eq!(*probe.asked.lock().unwrap(), 0);
+        let gpu = tick(&mut readers, t0 + Duration::from_secs(4), &this);
+        assert_eq!(*probe.asked.lock().unwrap(), 1);
+        assert_eq!(gpu.busy, Some(0));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1002,7 +1085,7 @@ mod tests {
         let t0 = Instant::now();
         let s = Duration::from_secs;
         assert_eq!(
-            readers.read(t0, Wants::default()).drives,
+            readers.read(t0, &Wants::default()).drives,
             [drive(40.0, 70.0)]
         );
 
@@ -1011,27 +1094,27 @@ mod tests {
         // A read error elsewhere looks for devices again on the next tick, without the drive.
         readers.failed = true;
         assert_eq!(
-            readers.read(t0 + s(2), Wants::default()).drives,
+            readers.read(t0 + s(2), &Wants::default()).drives,
             [drive(40.0, 70.0)]
         );
         assert_eq!(
-            readers.read(t0 + s(29), Wants::default()).drives,
+            readers.read(t0 + s(29), &Wants::default()).drives,
             [drive(40.0, 70.0)]
         );
         // 30 s on: the temperature again, and the limit read once at first discovery.
         assert_eq!(
-            readers.read(t0 + s(30), Wants::default()).drives,
+            readers.read(t0 + s(30), &Wants::default()).drives,
             [drive(50.0, 70.0)]
         );
         hwmon.set("temp1_input", "55000");
         assert_eq!(
-            readers.read(t0 + s(60), Wants::default()).drives,
+            readers.read(t0 + s(60), &Wants::default()).drives,
             [drive(55.0, 70.0)]
         );
         // Nor does the minute's rediscovery read it.
         hwmon.set("temp1_input", "60000");
         assert_eq!(
-            readers.read(t0 + s(62), Wants::default()).drives,
+            readers.read(t0 + s(62), &Wants::default()).drives,
             [drive(55.0, 70.0)]
         );
     }
@@ -1042,11 +1125,11 @@ mod tests {
         let hwmon = FakeHwmon::new("discovery", "garbage", "70000");
         let mut readers = hwmon.readers();
         let t0 = Instant::now();
-        assert_eq!(readers.read(t0, Wants::default()).drives, []);
+        assert_eq!(readers.read(t0, &Wants::default()).drives, []);
         hwmon.set("temp1_input", "40000");
         let later = t0 + Duration::from_secs(30);
         assert_eq!(
-            readers.read(later, Wants::default()).drives,
+            readers.read(later, &Wants::default()).drives,
             [drive(40.0, 70.0)]
         );
     }
@@ -1078,7 +1161,7 @@ mod tests {
         let mut readers = hwmon.readers();
         readers.sys_block.clone_from(&class);
         readers.class_block.clone_from(&class);
-        let sample = readers.read(Instant::now(), Wants::default());
+        let sample = readers.read(Instant::now(), &Wants::default());
         let names: Vec<_> = sample.drives.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["Micron_2400_MTFDKBA512QFM"]);
         assert_eq!(sample.drive_disks, [Some("nvme0n1".to_owned())]);
@@ -1100,12 +1183,12 @@ mod tests {
         let mut readers = Readers::new(Box::new(recorder.clone()), VramCache::default());
         let t0 = Instant::now();
         let s = Duration::from_secs;
-        let closed = readers.read(t0, Wants::default());
+        let closed = readers.read(t0, &Wants::default());
         assert!(closed.processes.is_none());
-        readers.read(t0 + s(2), Wants::default());
-        let open = readers.read(t0 + s(4), OPEN);
+        readers.read(t0 + s(2), &Wants::default());
+        let open = readers.read(t0 + s(4), &OPEN);
         assert!(open.processes.is_some());
-        readers.read(t0 + s(30), Wants::default());
+        readers.read(t0 + s(30), &Wants::default());
         assert_eq!(
             *recorder.0.lock().unwrap(),
             [
@@ -1119,7 +1202,7 @@ mod tests {
     #[test]
     fn without_a_probe_there_are_no_mounts_or_processes() {
         let mut readers = Readers::new(Box::new(Unavailable), VramCache::default());
-        let sample = readers.read(Instant::now(), OPEN);
+        let sample = readers.read(Instant::now(), &OPEN);
         assert_eq!(sample.mounts, []);
         assert!(sample.processes.is_none());
     }
@@ -1154,7 +1237,7 @@ mod tests {
     #[test]
     fn reads_this_machine_s_procfs() {
         let mut readers = Readers::new(Box::new(Unavailable), VramCache::default());
-        let sample = readers.read(Instant::now(), Wants::default());
+        let sample = readers.read(Instant::now(), &Wants::default());
         assert!(sample.stat.is_some_and(|s| !s.cores.is_empty()));
         assert!(sample.mem.is_some());
         assert!(sample.load.is_some());

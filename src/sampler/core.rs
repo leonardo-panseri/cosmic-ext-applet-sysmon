@@ -6,9 +6,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::readers::Wants;
+use super::readers::{Nvml, Wants};
 use super::stats::{Sample, Stats, Tracker};
-use crate::panel::{Layout, PanelHysteresis, PanelSettings, PanelSummary, RowKind};
+use crate::panel::{GpuRef, Item, PanelHysteresis, PanelSettings, PanelSummary};
 
 /// The sampling interval, in both tiers (D2).
 pub const INTERVAL: Duration = Duration::from_secs(2);
@@ -24,9 +24,6 @@ pub enum Control {
     OnBattery(bool),
     /// The panel button's settings changed (§2.3).
     Settings(PanelSettings),
-    /// The panel is horizontal, or vertical, where the panel button is always
-    /// [`Layout::Compact`]. Sent at start and whenever it changes.
-    Horizontal(bool),
 }
 
 /// What the sampler tells the UI.
@@ -39,14 +36,8 @@ pub struct Update {
 
 /// The sampler's state between ticks.
 #[derive(Debug)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent facts the UI reports, not a state machine"
-)]
 pub struct Core {
     settings: PanelSettings,
-    /// Whether the panel is horizontal; until told, it is.
-    horizontal: bool,
     tracker: Tracker,
     popup_open: bool,
     /// Stay in the open tier whatever the popup does (`SYSMON_DEBUG_OPEN`).
@@ -63,7 +54,6 @@ impl Core {
     pub fn new(settings: PanelSettings) -> Self {
         Self {
             settings,
-            horizontal: true,
             tracker: Tracker::default(),
             popup_open: false,
             force_open: false,
@@ -81,25 +71,32 @@ impl Core {
         self
     }
 
-    /// The panel button's layout on this panel.
-    fn layout(&self) -> Layout {
-        self.settings.layout_for(self.horizontal)
-    }
-
     /// What the current tier reads beyond the closed tier: the processes while the popup is
-    /// open, NVIDIA stats too, or whenever the panel button shows `gpu` or a GPU temperature or
-    /// VRAM warning is on (D2). NVML is still asked only while a card is awake, with the back-off
-    /// of ADR 0003 ([`super::nvml_schedule`]).
+    /// open; NVIDIA stats then too, or whenever a GPU temperature or VRAM warning is on, or the
+    /// panel button shows a GPU item: for any card if its GPU is Auto, else for its own card (D2).
+    /// NVML is still asked only while a wanted card is awake, with the back-off of ADR 0003
+    /// ([`super::nvml_schedule`]).
     #[must_use]
     pub fn wants(&self) -> Wants {
-        let gpu_shown = self
-            .settings
-            .shown_rows(self.layout())
-            .contains(&RowKind::Gpu);
-        let nvidia_warns = self.settings.warn_gpu_temp.on || self.settings.warn_vram.on;
+        let mut any =
+            self.popup_open || self.settings.warn_gpu_temp.on || self.settings.warn_vram.on;
+        let mut cards = Vec::new();
+        for gpu in self.settings.rows.items().filter_map(Item::gpu) {
+            match gpu {
+                GpuRef::Auto => any = true,
+                GpuRef::Pci(pci) => cards.push(pci.clone()),
+            }
+        }
+        let nvml = if any {
+            Nvml::Any
+        } else if cards.is_empty() {
+            Nvml::Off
+        } else {
+            Nvml::Cards(cards)
+        };
         Wants {
             processes: self.popup_open,
-            nvml: self.popup_open || gpu_shown || nvidia_warns,
+            nvml,
         }
     }
 
@@ -127,7 +124,7 @@ impl Core {
     pub fn sample(&mut self, sample: Sample, at: Instant) -> Option<Update> {
         let stats = self.tracker.ingest(sample, at);
         let update = Update {
-            panel: PanelSummary::new(&stats, &self.settings, self.layout()),
+            panel: PanelSummary::new(&stats, &self.settings),
             stats: Arc::new(stats),
         };
         self.last = Some((at, update.clone()));
@@ -136,8 +133,8 @@ impl Core {
     }
 
     /// Applies `control`. Opening the popup returns the last update right away, so the popup has
-    /// the history without waiting for a tick. New settings, or a new orientation, return the
-    /// last sample's update redone under them, if that changes what the panel button shows, so
+    /// the history without waiting for a tick. New settings return the last sample's update
+    /// redone under them, if that changes what the panel button shows, so
     /// it redraws at once.
     pub fn control(&mut self, control: Control) -> Option<Update> {
         match control {
@@ -157,19 +154,15 @@ impl Core {
                 self.settings = settings;
                 self.redo()
             }
-            Control::Horizontal(horizontal) => {
-                self.horizontal = horizontal;
-                self.redo()
-            }
         }
     }
 
-    /// The last sample's update under the current settings and layout, if that changes what
+    /// The last sample's update under the current settings, if that changes what
     /// the panel button shows at all: no hysteresis for a change the user made.
     fn redo(&mut self) -> Option<Update> {
         let (at, last) = self.last.take()?;
         let update = Update {
-            panel: PanelSummary::new(&last.stats, &self.settings, self.layout()),
+            panel: PanelSummary::new(&last.stats, &self.settings),
             stats: last.stats,
         };
         self.last = Some((at, update.clone()));
@@ -188,8 +181,9 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panel::Limit;
+    use crate::panel::{Layout, Limit, NetRef, Row, Rows};
     use crate::sampler::nvml_schedule::{NvmlSchedule, Tick};
+    use crate::sources::drm::RuntimeStatus;
     use crate::sources::meminfo::MemInfo;
 
     fn memory(percent: u64) -> Sample {
@@ -203,20 +197,21 @@ mod tests {
         }
     }
 
-    fn bottom(update: Option<Update>) -> Option<String> {
-        update.and_then(|u| u.panel.bottom)
+    /// The RAM item's value: the first of the bottom row in the default rows.
+    fn ram(update: Option<Update>) -> Option<String> {
+        update.and_then(|u| u.panel.bottom.first().and_then(|i| i.value.clone()))
     }
 
     #[test]
     fn closed_tier_sends_only_what_moves_the_panel_enough() {
         let mut core = Core::new(PanelSettings::default());
         let t0 = Instant::now();
-        assert_eq!(bottom(core.sample(memory(45), t0)).as_deref(), Some("45%"));
+        assert_eq!(ram(core.sample(memory(45), t0)).as_deref(), Some("45%"));
         assert!(core.sample(memory(45), t0 + INTERVAL).is_none());
         // One point is under the threshold: the panel keeps showing 45 %.
         assert!(core.sample(memory(46), t0 + 2 * INTERVAL).is_none());
         assert_eq!(
-            bottom(core.sample(memory(47), t0 + 3 * INTERVAL)).as_deref(),
+            ram(core.sample(memory(47), t0 + 3 * INTERVAL)).as_deref(),
             Some("47%")
         );
     }
@@ -233,7 +228,7 @@ mod tests {
         }
         // 30 s after the last send.
         let update = core.sample(memory(46), at + INTERVAL);
-        assert_eq!(bottom(update).as_deref(), Some("46%"));
+        assert_eq!(ram(update).as_deref(), Some("46%"));
     }
 
     #[test]
@@ -252,46 +247,21 @@ mod tests {
         let t0 = Instant::now();
         core.sample(memory(89), t0);
         let update = core.sample(memory(90), t0 + INTERVAL).unwrap();
-        assert!(update.panel.row_warns(RowKind::Memory));
+        assert!(update.panel.bottom[0].warns);
         let update = core.sample(memory(89), t0 + 2 * INTERVAL).unwrap();
-        assert!(!update.panel.row_warns(RowKind::Memory));
+        assert!(!update.panel.bottom[0].warns);
     }
 
     #[test]
-    fn values_compact_doesn_t_show_send_nothing() {
-        let compact = PanelSettings {
-            layout: Layout::Compact,
+    fn values_no_item_shows_send_nothing() {
+        let no_ram = PanelSettings {
+            rows: Rows::new(vec![Item::Cpu], vec![]),
             ..PanelSettings::default()
         };
-        let mut core = Core::new(compact);
+        let mut core = Core::new(no_ram);
         let t0 = Instant::now();
         assert!(core.sample(memory(45), t0).is_some());
-        // Memory is the bottom row, which Compact doesn't show.
         assert!(core.sample(memory(60), t0 + INTERVAL).is_none());
-    }
-
-    #[test]
-    fn a_vertical_panel_shows_only_the_top_row() {
-        let mut core = Core::new(PanelSettings::default());
-        assert!(core.control(Control::Horizontal(false)).is_none());
-        let t0 = Instant::now();
-        let update = core.sample(memory(45), t0).unwrap();
-        assert_eq!(update.panel.bottom, None);
-        assert!(core.sample(memory(60), t0 + INTERVAL).is_none());
-        // Back on a horizontal panel: the memory row at once.
-        let update = core.control(Control::Horizontal(true)).unwrap();
-        assert_eq!(update.panel.bottom.as_deref(), Some("60%"));
-    }
-
-    #[test]
-    fn a_gpu_row_hidden_by_a_vertical_panel_wants_no_nvml() {
-        let mut core = Core::new(PanelSettings {
-            bottom: RowKind::Gpu,
-            ..no_nvidia_warnings()
-        });
-        assert!(core.wants().nvml);
-        core.control(Control::Horizontal(false));
-        assert!(!core.wants().nvml);
     }
 
     #[test]
@@ -344,31 +314,30 @@ mod tests {
         core.sample(sample, t0);
 
         let shows_temp = PanelSettings {
-            bottom: RowKind::CpuTemp,
+            rows: Rows::new(vec![Item::Ram], vec![Item::CpuTemp]),
             ..PanelSettings::default()
         };
         let update = core.control(Control::Settings(shows_temp.clone())).unwrap();
-        assert_eq!(update.panel.bottom.as_deref(), Some("88°C"));
-        // The hot CPU's temperature row warns, not the whole button.
-        let shown = shows_temp.shown_rows(shows_temp.layout);
-        assert!(update.panel.row_warns(RowKind::CpuTemp));
-        assert!(!update.panel.button_warns(&shown));
+        assert_eq!(update.panel.bottom[0].value.as_deref(), Some("88°C"));
+        // The hot CPU's temperature item warns, not the whole button.
+        assert!(update.panel.bottom[0].warns);
+        assert!(!update.panel.button_warns);
         // The same settings again change nothing.
         assert!(core.control(Control::Settings(shows_temp)).is_none());
         // Later samples follow the new settings.
         let mut sample = memory(45);
         sample.cpu_temp = Some(89.0);
         let update = core.sample(sample, t0 + INTERVAL).unwrap();
-        assert_eq!(update.panel.bottom.as_deref(), Some("89°C"));
+        assert_eq!(update.panel.bottom[0].value.as_deref(), Some("89°C"));
 
-        // Neither CPU row on the panel button: the whole button warns.
+        // No CPU item on the panel button: the whole button warns.
         let no_cpu = PanelSettings {
-            top: RowKind::Disk,
+            rows: Rows::new(vec![Item::root_usage()], vec![Item::Ram]),
             ..PanelSettings::default()
         };
-        let update = core.control(Control::Settings(no_cpu.clone())).unwrap();
-        assert_eq!(update.panel.bottom.as_deref(), Some("45%"));
-        assert!(update.panel.button_warns(&no_cpu.shown_rows(no_cpu.layout)));
+        let update = core.control(Control::Settings(no_cpu)).unwrap();
+        assert_eq!(update.panel.bottom[0].value.as_deref(), Some("45%"));
+        assert!(update.panel.button_warns);
     }
 
     #[test]
@@ -380,7 +349,7 @@ mod tests {
             ..PanelSettings::default()
         };
         let update = core.control(Control::Settings(strict)).unwrap();
-        assert!(update.panel.row_warns(RowKind::Memory));
+        assert!(update.panel.bottom[0].warns);
         let update = core
             .control(Control::Settings(PanelSettings::default()))
             .unwrap();
@@ -396,13 +365,22 @@ mod tests {
             layout: Layout::OneLine,
             ..PanelSettings::default()
         };
-        assert!(core.control(Control::Settings(one_line.clone())).is_none());
-        let hidden_rates = PanelSettings {
-            network: false,
-            ..one_line
-        };
-        // The rates were already `None` without a second sample, so nothing changes either.
-        assert!(core.control(Control::Settings(hidden_rates)).is_none());
+        assert!(core.control(Control::Settings(one_line)).is_none());
+    }
+
+    #[test]
+    fn a_new_item_is_sent_at_once() {
+        let mut core = Core::new(PanelSettings::default());
+        core.sample(memory(45), Instant::now());
+        let mut rows = Rows::default();
+        rows.push(Row::Top, Item::Upload(NetRef::All));
+        let update = core
+            .control(Control::Settings(PanelSettings {
+                rows,
+                ..PanelSettings::default()
+            }))
+            .unwrap();
+        assert_eq!(update.panel.top.len(), 3);
     }
 
     /// The default settings with both NVIDIA warnings off.
@@ -414,35 +392,76 @@ mod tests {
         }
     }
 
-    /// Whether the closed tier asks NVML on its first tick, with the card `awake` or not.
-    fn asks_nvml(core: &Core, awake: bool) -> bool {
+    /// The settings without NVIDIA warnings, with `item` added to the top row.
+    fn showing(item: Item) -> PanelSettings {
+        let mut settings = no_nvidia_warnings();
+        settings.rows.push(Row::Top, item);
+        settings
+    }
+
+    /// Whether the closed tier asks NVML on its first tick, with the card at `pci` `awake` or
+    /// not.
+    fn asks_nvml(core: &Core, pci: &str, awake: bool) -> bool {
+        let gpu = crate::sampler::stats::GpuSample {
+            pci: Some(pci.into()),
+            nvidia: true,
+            status: if awake {
+                RuntimeStatus::Active
+            } else {
+                RuntimeStatus::Suspended
+            },
+            ..Default::default()
+        };
+        let wants = core.wants();
         NvmlSchedule::default().due(Tick {
             now: Instant::now(),
-            awake,
-            wanted: core.wants().nvml,
+            awake: gpu.status.may_query() && wants.nvml.covers(&gpu),
+            wanted: wants.nvml != Nvml::Off,
         })
     }
 
+    const NVIDIA: &str = "0000:01:00.0";
+    const AMD: &str = "0000:05:00.0";
+
     #[test]
     fn an_nvidia_warning_asks_nvml_with_the_popup_closed_only_while_awake() {
-        // The defaults: CPU and memory rows, the GPU temperature warning on.
+        // The defaults: no GPU item, the GPU temperature warning on.
         let core = Core::new(PanelSettings::default());
-        assert!(core.wants().nvml);
-        assert!(asks_nvml(&core, true));
-        assert!(!asks_nvml(&core, false));
+        assert_eq!(core.wants().nvml, Nvml::Any);
+        assert!(asks_nvml(&core, NVIDIA, true));
+        assert!(!asks_nvml(&core, NVIDIA, false));
         let vram_only = Core::new(PanelSettings {
             warn_vram: Limit::on(90),
             ..no_nvidia_warnings()
         });
-        assert!(asks_nvml(&vram_only, true));
-        assert!(!asks_nvml(&vram_only, false));
+        assert!(asks_nvml(&vram_only, NVIDIA, true));
+        assert!(!asks_nvml(&vram_only, NVIDIA, false));
     }
 
     #[test]
-    fn without_nvidia_warnings_or_a_gpu_row_nvml_isn_t_wanted() {
+    fn without_nvidia_warnings_or_a_gpu_item_nvml_isn_t_wanted() {
         let core = Core::new(no_nvidia_warnings());
         assert_eq!(core.wants(), Wants::default());
-        assert!(!asks_nvml(&core, true));
+        assert!(!asks_nvml(&core, NVIDIA, true));
+    }
+
+    #[test]
+    fn an_auto_gpu_item_wants_any_awake_card() {
+        let core = Core::new(showing(Item::GpuTemp(GpuRef::Auto)));
+        assert_eq!(core.wants().nvml, Nvml::Any);
+        assert!(asks_nvml(&core, NVIDIA, true));
+        assert!(!asks_nvml(&core, NVIDIA, false));
+    }
+
+    #[test]
+    fn a_gpu_item_for_one_card_wants_only_that_card_and_only_awake() {
+        let core = Core::new(showing(Item::Vram(GpuRef::Pci(NVIDIA.into()))));
+        assert_eq!(core.wants().nvml, Nvml::Cards(vec![NVIDIA.into()]));
+        assert!(asks_nvml(&core, NVIDIA, true));
+        assert!(!asks_nvml(&core, NVIDIA, false));
+        // An item for the iGPU wants no NVML for the NVIDIA card.
+        let igpu = Core::new(showing(Item::GpuUsage(GpuRef::Pci(AMD.into()))));
+        assert!(!asks_nvml(&igpu, NVIDIA, true));
     }
 
     #[test]
@@ -452,13 +471,13 @@ mod tests {
             warn_gpu_temp: Limit::on(85),
             ..no_nvidia_warnings()
         }));
-        assert!(core.wants().nvml);
+        assert_eq!(core.wants().nvml, Nvml::Any);
         core.control(Control::Settings(no_nvidia_warnings()));
-        assert!(!core.wants().nvml);
+        assert_eq!(core.wants().nvml, Nvml::Off);
     }
 
     #[test]
-    fn nvml_is_wanted_while_open_or_with_gpu_on_the_panel_button() {
+    fn nvml_is_wanted_while_open_or_with_a_gpu_item() {
         let mut core = Core::new(no_nvidia_warnings());
         assert_eq!(core.wants(), Wants::default());
         core.control(Control::PopupOpen(true));
@@ -466,28 +485,18 @@ mod tests {
             core.wants(),
             Wants {
                 processes: true,
-                nvml: true
+                nvml: Nvml::Any
             }
         );
         core.control(Control::PopupOpen(false));
-        core.control(Control::Settings(PanelSettings {
-            bottom: RowKind::Gpu,
-            ..no_nvidia_warnings()
-        }));
+        core.control(Control::Settings(showing(Item::GpuUsage(GpuRef::Auto))));
         assert_eq!(
             core.wants(),
             Wants {
                 processes: false,
-                nvml: true
+                nvml: Nvml::Any
             }
         );
-        // Compact shows only the top row.
-        core.control(Control::Settings(PanelSettings {
-            bottom: RowKind::Gpu,
-            layout: Layout::Compact,
-            ..no_nvidia_warnings()
-        }));
-        assert!(!core.wants().nvml);
     }
 
     #[test]
@@ -495,7 +504,7 @@ mod tests {
         let mut core = Core::new(PanelSettings::default()).forced_open(true);
         assert!(core.wants().processes);
         core.control(Control::PopupOpen(false));
-        assert!(core.wants().nvml);
+        assert_eq!(core.wants().nvml, Nvml::Any);
         assert_eq!(core.interval(), INTERVAL);
     }
 

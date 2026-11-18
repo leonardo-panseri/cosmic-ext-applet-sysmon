@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The panel button (plan §2.1): one of three layouts of a [`PanelSummary`], each row an icon and
-//! a value, with fixed-size icons and fixed-width value cells so a changing value never re-lays
-//! out the panel (D6). A value starts right after its icon; items are further apart.
+//! The panel button (plan §2.1, `docs/panel-builder.md`): its two rows of items in one of two
+//! layouts, each item a glyph and a value, with fixed-size glyphs and fixed-width value cells so a
+//! changing value never re-lays out the panel (D6). A value starts right after its glyph; items
+//! are further apart.
+//!
+//! - **Stacked**: the rows one above the other, in columns, so the items of both rows line up.
+//! - **One line**: the top row, then the bottom row.
+//! - On a **vertical panel**, the items go one below the other, each glyph above its value.
 
 use std::borrow::Cow;
 
@@ -15,8 +20,8 @@ use cosmic::widget::{self, icon};
 
 use crate::app::Message;
 use crate::fl;
-use crate::panel::{Layout, PanelSettings, PanelSummary, RowKind, Warning, format};
-use crate::ui::icons;
+use crate::panel::{Item, Layout, PanelSettings, PanelSummary, Row, Warning};
+use crate::ui::icons::{self, Glyph};
 
 /// Line height of the panel text, relative to its size.
 const LINE_HEIGHT: f32 = 1.2;
@@ -42,137 +47,175 @@ const ITEM_GAP: f32 = 0.6;
 /// default monospace font, and most others are 0.6 em).
 const MONO_ADVANCE: f32 = 0.6;
 
-/// One shown row: what it shows, its value and whether it takes the warning colour.
-struct Row {
-    kind: RowKind,
+/// One item as drawn: what it is, its value and whether it takes the warning colour.
+struct Cell {
+    item: Item,
     value: String,
     warn: bool,
 }
 
+/// The cells of `row`: from `summary`, or before the first sample `settings`' items without
+/// values. Every cell warns when the whole button does.
+fn cells(settings: &PanelSettings, summary: Option<&PanelSummary>, row: Row) -> Vec<Cell> {
+    let no_value = || fl!("no-value");
+    match summary {
+        Some(summary) => summary
+            .row(row)
+            .iter()
+            .map(|shown| Cell {
+                item: shown.item.clone(),
+                value: shown.value.clone().unwrap_or_else(no_value),
+                warn: shown.warns || summary.button_warns,
+            })
+            .collect(),
+        None => settings
+            .rows
+            .row(row)
+            .iter()
+            .map(|item| Cell {
+                item: item.clone(),
+                value: no_value(),
+                warn: false,
+            })
+            .collect(),
+    }
+}
+
 /// The panel button for `summary` (`None` before the first sample), laid out per `settings`.
+/// It does nothing when pressed: the caller says what a press does.
 pub fn panel_button<'a>(
     applet: &Context,
     settings: &PanelSettings,
     summary: Option<&PanelSummary>,
 ) -> widget::Button<'a, Message> {
-    let layout = settings.layout_for(applet.is_horizontal());
-    let shown = settings.shown_rows(layout);
-    let button_warns = summary.is_some_and(|s| s.button_warns(&shown));
-    let rows: Vec<Row> = shown
-        .iter()
-        .enumerate()
-        .map(|(i, &kind)| {
-            let value = summary.and_then(|s| {
-                if i == 0 {
-                    s.top.clone()
-                } else {
-                    s.bottom.clone()
-                }
-            });
-            Row {
-                kind,
-                value: value.unwrap_or_else(|| fl!("no-value")),
-                warn: button_warns || summary.is_some_and(|s| s.row_warns(kind)),
-            }
-        })
-        .collect();
-    let rates = settings.shows_rates(layout).then(|| {
-        let rate = |r: Option<&String>| r.cloned().unwrap_or_else(|| fl!("no-value"));
-        [
-            (fl!("download"), rate(summary.and_then(|s| s.down.as_ref()))),
-            (fl!("upload"), rate(summary.and_then(|s| s.up.as_ref()))),
-        ]
-    });
-
+    let top = cells(settings, summary, Row::Top);
+    let bottom = cells(settings, summary, Row::Bottom);
+    if top.is_empty() && bottom.is_empty() {
+        // Nothing chosen: the CPU icon, so the popup can still be opened.
+        let warn = summary.is_some_and(|s| s.button_warns);
+        let (_, icon_height) = applet.suggested_size(true);
+        return applet.button_from_element(glyph(&Item::Cpu, f32::from(icon_height), warn), true);
+    }
+    if !applet.is_horizontal() {
+        return vertical_button(applet, top, bottom);
+    }
     let (_, icon_height) = applet.suggested_size(true);
     let (major_padding, minor_padding) = applet.suggested_padding(true);
     let height = f32::from(icon_height + 2 * minor_padding);
-    let button = match layout {
-        Layout::Stacked => {
-            // As `applet.text_button`, which takes only a single text. The panel is horizontal.
-            let size = font_size(height, STACKED_FONT_SHARE);
-            let (icons, values): (Vec<_>, Vec<_>) = rows
-                .into_iter()
-                .map(|row| {
-                    (
-                        row_icon(row.kind, size, row.warn),
-                        value_cell(row.value, row.kind.widest_value(), size, row.warn),
-                    )
-                })
-                .unzip();
-            // A column of icons beside a column of values, so the values line up.
-            let mut items = vec![item(
-                widget::Column::with_children(icons),
-                widget::Column::with_children(values),
-                size,
-            )];
-            if let Some(rates) = rates {
-                let (arrows, rates): (Vec<_>, Vec<_>) = rates
-                    .into_iter()
-                    .map(|(arrow, rate)| {
-                        (
-                            panel_text(arrow, size, button_warns).into(),
-                            value_cell(rate, format::WIDEST_RATE, size, button_warns),
-                        )
-                    })
-                    .unzip();
-                items.push(item(
-                    widget::Column::with_children(arrows),
-                    widget::Column::with_children(rates),
-                    size,
-                ));
-            }
-            text_button(items_row(items, size), height, major_padding)
-        }
-        Layout::Compact if !applet.is_horizontal() => match rows.into_iter().next() {
-            Some(row) => vertical_button(applet, row),
-            None => applet.button_from_element(widget::Space::new(), true),
-        },
-        // On a horizontal panel only the height limits Compact: its one row on one line.
-        Layout::OneLine | Layout::Compact => {
-            let size = font_size(height, ONE_LINE_FONT_SHARE);
-            let mut items: Vec<_> = rows
-                .into_iter()
-                .map(|row| {
-                    item(
-                        row_icon(row.kind, size, row.warn),
-                        value_cell(row.value, row.kind.widest_value(), size, row.warn),
-                        size,
-                    )
-                })
-                .collect();
-            items.extend(rates.into_iter().flatten().map(|(arrow, rate)| {
-                item(
-                    panel_text(arrow, size, button_warns),
-                    value_cell(rate, format::WIDEST_RATE, size, button_warns),
-                    size,
-                )
-            }));
-            text_button(items_row(items, size), height, major_padding)
-        }
+    let content = match settings.layout {
+        Layout::Stacked => stacked(top, bottom, font_size(height, STACKED_FONT_SHARE)),
+        Layout::OneLine => one_line(top, bottom, font_size(height, ONE_LINE_FONT_SHARE)),
     };
-    // On press, not release, like COSMIC's own applets.
-    button.on_press_down(Message::TogglePopup)
+    text_button(content, height, major_padding)
 }
 
-/// The Compact button of a vertical panel, as square as an icon button: the value may use the
-/// icon's width and half the padding beside it, and the icon goes above it, both centred, if the
-/// button's height leaves room.
-fn vertical_button<'a>(applet: &Context, row: Row) -> widget::Button<'a, Message> {
-    let (icon_width, icon_height) = applet.suggested_size(true);
-    let (major_padding, minor_padding) = applet.suggested_padding(true);
-    let widest = row.kind.widest_value();
+/// The rows one above the other, in columns: column `i` holds the `i`th item of each row, a
+/// column of glyphs beside a column of values as wide as the wider of the two (D6), so the
+/// values line up.
+fn stacked<'a>(top: Vec<Cell>, bottom: Vec<Cell>, size: f32) -> Element<'a, Message> {
+    let columns = top.len().max(bottom.len());
+    let mut top = top.into_iter();
+    let mut bottom = bottom.into_iter();
+    let items = (0..columns)
+        .map(|_| {
+            let pair = [top.next(), bottom.next()];
+            let widest = pair
+                .iter()
+                .flatten()
+                .map(|cell| cell.item.value_kind().widest())
+                .max_by_key(|w| w.chars().count())
+                .unwrap_or_default();
+            let (glyphs, values): (Vec<_>, Vec<_>) = pair
+                .into_iter()
+                .map(|cell| match cell {
+                    Some(cell) => (
+                        glyph(&cell.item, size, cell.warn),
+                        value_cell(cell.value, widest, size, cell.warn),
+                    ),
+                    None => (blank_line(size), blank_line(size)),
+                })
+                .unzip();
+            item(
+                widget::Column::with_children(glyphs),
+                widget::Column::with_children(values),
+                size,
+            )
+        })
+        .collect();
+    items_row(items, size)
+}
+
+/// The top row, then the bottom row, on one line.
+fn one_line<'a>(top: Vec<Cell>, bottom: Vec<Cell>, size: f32) -> Element<'a, Message> {
+    let line = |cells: Vec<Cell>| -> Vec<Element<'a, Message>> {
+        cells
+            .into_iter()
+            .map(|cell| {
+                let widest = cell.item.value_kind().widest();
+                item(
+                    glyph(&cell.item, size, cell.warn),
+                    value_cell(cell.value, widest, size, cell.warn),
+                    size,
+                )
+            })
+            .collect()
+    };
+    let mut items = line(top);
+    items.extend(line(bottom));
+    items_row(items, size)
+}
+
+/// A line of panel text's height with nothing in it, for a missing cell.
+fn blank_line<'a>(size: f32) -> Element<'a, Message> {
+    widget::Space::new()
+        .height(Length::Fixed(size * LINE_HEIGHT))
+        .into()
+}
+
+/// The button of a vertical panel, as wide as an icon button: one column of items, each glyph
+/// above its value, both centred, the value sized so the widest value of any item shown fits the
+/// icon's width and half the padding beside it.
+fn vertical_button<'a>(
+    applet: &Context,
+    top: Vec<Cell>,
+    bottom: Vec<Cell>,
+) -> widget::Button<'a, Message> {
+    let (icon_width, _) = applet.suggested_size(true);
+    let (_, minor_padding) = applet.suggested_padding(true);
     let room = f32::from(icon_width + minor_padding);
+    let chars = top
+        .iter()
+        .chain(&bottom)
+        .map(|cell| cell.item.value_kind().widest().chars().count())
+        .max()
+        .unwrap_or(1);
     #[expect(clippy::cast_precision_loss, reason = "a few characters")]
-    let chars = widest.chars().count() as f32;
-    let size = (room / (chars * MONO_ADVANCE)).floor().max(MIN_FONT_SIZE);
-    let mut content = widget::Column::new().align_x(Alignment::Center);
-    // On a vertical panel the major (shrinkable) padding is above and below.
-    if 2.0 * size * LINE_HEIGHT <= f32::from(icon_height + 2 * major_padding) {
-        content = content.push(row_icon(row.kind, size, row.warn));
-    }
-    let value = value_cell_aligned(row.value, widest, size, row.warn, Alignment::Center);
-    applet.button_from_element(content.push(value), true)
+    let size = (room / (chars as f32 * MONO_ADVANCE))
+        .floor()
+        .max(MIN_FONT_SIZE);
+    let column = vertical_column(top.into_iter().chain(bottom), size);
+    applet.button_from_element(column, true)
+}
+
+/// `cells` one below the other, each glyph above its value, both centred.
+fn vertical_column<'a>(cells: impl Iterator<Item = Cell>, size: f32) -> Element<'a, Message> {
+    widget::Column::with_children(cells.map(|cell| {
+        let widest = cell.item.value_kind().widest();
+        widget::Column::new()
+            .align_x(Alignment::Center)
+            .push(glyph(&cell.item, size, cell.warn))
+            .push(value_cell_aligned(
+                cell.value,
+                widest,
+                size,
+                cell.warn,
+                Alignment::Center,
+            ))
+            .into()
+    }))
+    .align_x(Alignment::Center)
+    .spacing((size * ICON_GAP).round())
+    .into()
 }
 
 /// The panel button's tooltip: the active warnings, one per line. Empty without warnings.
@@ -254,22 +297,28 @@ fn warning_text(warning: &Warning) -> String {
     }
 }
 
-/// A row's icon at the text's `size`, centred in a line of panel text; in the destructive colour
-/// if `warn`. Always the same size, whatever the value (D6).
-fn row_icon<'a>(kind: RowKind, size: f32, warn: bool) -> Element<'a, Message> {
-    // A few pixels, far inside u16.
-    #[expect(clippy::cast_possible_truncation, reason = "see above")]
-    #[expect(clippy::cast_sign_loss, reason = "see above")]
-    let pixels = size.round() as u16;
-    let mut icon = icon::icon(icons::row(kind)).size(pixels);
-    if warn {
-        icon = icon.class(cosmic::theme::Svg::custom(|theme| {
-            cosmic::iced::widget::svg::Style {
-                color: Some(theme.cosmic().destructive_color().into()),
+/// An item's glyph at the text's `size`, centred in a line of panel text; in the destructive
+/// colour if `warn`. Always the same size, whatever the value (D6).
+pub(crate) fn glyph<'a>(item: &Item, size: f32, warn: bool) -> Element<'a, Message> {
+    let content: Element<'a, Message> = match icons::item(item) {
+        Glyph::Icon(handle) => {
+            // A few pixels, far inside u16.
+            #[expect(clippy::cast_possible_truncation, reason = "see above")]
+            #[expect(clippy::cast_sign_loss, reason = "see above")]
+            let pixels = size.round() as u16;
+            let mut icon = icon::icon(handle).size(pixels);
+            if warn {
+                icon = icon.class(cosmic::theme::Svg::custom(|theme| {
+                    cosmic::iced::widget::svg::Style {
+                        color: Some(theme.cosmic().destructive_color().into()),
+                    }
+                }));
             }
-        }));
-    }
-    widget::container(icon)
+            icon.into()
+        }
+        Glyph::Text(text) => panel_text(text, size, warn).into(),
+    };
+    widget::container(content)
         .center_y(Length::Fixed(size * LINE_HEIGHT))
         .into()
 }
@@ -375,11 +424,9 @@ mod tests {
     #[test]
     fn the_tooltip_lists_each_warning_on_its_own_line() {
         let summary = PanelSummary {
-            top: None,
-            bottom: None,
-            down: None,
-            up: None,
-            gpu_card: None,
+            top: vec![],
+            bottom: vec![],
+            button_warns: true,
             warnings: vec![
                 Warning::CpuTemp {
                     celsius: 91,
@@ -441,11 +488,9 @@ mod tests {
     fn no_warnings_no_tooltip() {
         assert_eq!(tooltip(None), "");
         let summary = PanelSummary {
-            top: Some("12%".into()),
-            bottom: None,
-            down: None,
-            up: None,
-            gpu_card: None,
+            top: vec![],
+            bottom: vec![],
+            button_warns: false,
             warnings: vec![],
         };
         assert_eq!(tooltip(Some(&summary)), "");
