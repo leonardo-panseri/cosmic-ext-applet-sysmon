@@ -247,22 +247,11 @@ fn memory<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message
 /// One block per GPU, the NVIDIA cards first. A suspended card shows `Suspended`, and its VRAM
 /// as 0 of the size cached the last time it was awake, if ever (D4).
 fn gpus<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> {
-    let history = |card: &str| {
-        stats
-            .history
-            .gpus
-            .iter()
-            .find(|(c, _)| c == card)
-            .map(|(_, h)| h)
-    };
+    let history = |card: &str| stats.history.gpus.iter().find(|h| h.card == card);
     let gpus = stats.gpus_nvidia_first().map(|gpu| {
         let mut rows = vec![gpu_header(gpu, settings)];
-        if gpu.busy.is_some()
-            && let Some(history) = history(&gpu.card)
-        {
-            rows.push(graph::percent(history));
-        }
-        if let (Some(used), Some(total)) = (gpu.vram_used, gpu.vram_total) {
+        let vram = gpu.vram_used.zip(gpu.vram_total);
+        if let Some((used, total)) = vram {
             let percent = share(used, total).unwrap_or(0.0);
             rows.push(since_start(
                 stat_row(
@@ -278,6 +267,15 @@ fn gpus<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> 
                 bytes,
                 Position::Top,
             ));
+        }
+        // Awake: load above the line and, with a reading, VRAM below, as memory and swap.
+        if gpu.busy.is_some()
+            && let Some(history) = history(&gpu.card)
+        {
+            rows.push(match vram {
+                Some(_) => graph::mirrored_percent(&history.busy, &history.vram),
+                None => graph::percent(&history.busy),
+            });
         }
         block(rows)
     });

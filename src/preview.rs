@@ -46,7 +46,7 @@ use crate::panel::{
 use crate::sampler::history::{HISTORY_LEN, History};
 use crate::sampler::rates::PairRate;
 use crate::sampler::stats::{
-    DeviceRate, DiskStats, DriveTemp, Extremes, GpuExtremes, GpuSample, Histories,
+    DeviceRate, DiskStats, DriveTemp, Extremes, GpuExtremes, GpuHistory, GpuSample, Histories,
     InterfaceHistory, MinMax, Processes, Stats,
 };
 use crate::sources::drm::RuntimeStatus;
@@ -587,8 +587,16 @@ pub fn fixture() -> Stats {
         memory: wave(39.0, 4.0, 0.7),
         swap: wave(8.0, 3.0, 2.4),
         gpus: vec![
-            ("card0".into(), idle()),
-            ("card1".into(), wave(30.0, 18.0, 1.3)),
+            GpuHistory {
+                card: "card0".into(),
+                busy: idle(),
+                vram: idle(),
+            },
+            GpuHistory {
+                card: "card1".into(),
+                busy: wave(30.0, 18.0, 1.3),
+                vram: wave(42.0, 6.0, 0.2),
+            },
         ],
         net_down: wave_bytes(1.4 * MIB, 0.9 * MIB, 0.4),
         net_up: wave_bytes(0.9 * MIB, 0.6 * MIB, 2.1),

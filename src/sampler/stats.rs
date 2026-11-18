@@ -226,13 +226,22 @@ pub struct Histories {
     /// Memory in use and swap in use, % of their totals; swap is 0 without any.
     pub memory: History,
     pub swap: History,
-    /// Each GPU's load, %, by card; 0 while suspended.
-    pub gpus: Vec<(String, History)>,
+    /// Each GPU's load and VRAM in use, in [`Stats::gpus`] order.
+    pub gpus: Vec<GpuHistory>,
     /// Network download and upload, bytes/s, all physical interfaces together.
     pub net_down: History,
     pub net_up: History,
     /// Each physical interface's download and upload, in [`Stats::net`] order.
     pub interfaces: Vec<InterfaceHistory>,
+}
+
+/// One GPU's history, by card: its load and its VRAM in use, % (of the total); both 0 while
+/// suspended, and VRAM 0 without a reading.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GpuHistory {
+    pub card: String,
+    pub busy: History,
+    pub vram: History,
 }
 
 /// One network interface's history, bytes/s.
@@ -492,13 +501,23 @@ impl Tracker {
     }
 
     fn push_gpu_history(&mut self, gpus: &[GpuSample]) {
-        let mut old: HashMap<_, _> = std::mem::take(&mut self.history.gpus).into_iter().collect();
+        let mut old: HashMap<_, _> = std::mem::take(&mut self.history.gpus)
+            .into_iter()
+            .map(|h| (h.card.clone(), h))
+            .collect();
         self.history.gpus = gpus
             .iter()
             .map(|gpu| {
-                let mut history = old.remove(&gpu.card).unwrap_or_default();
-                history.push(gpu.busy.map_or(0.0, f32::from));
-                (gpu.card.clone(), history)
+                let mut history = old.remove(&gpu.card).unwrap_or_else(|| GpuHistory {
+                    card: gpu.card.clone(),
+                    ..GpuHistory::default()
+                });
+                history.busy.push(gpu.busy.map_or(0.0, f32::from));
+                let vram = gpu.vram_used.zip(gpu.vram_total);
+                history
+                    .vram
+                    .push(vram.and_then(|(u, t)| share(u, t)).unwrap_or(0.0));
+                history
             })
             .collect();
     }
@@ -764,6 +783,11 @@ mod tests {
 
     #[test]
     fn gpu_history_follows_each_card_and_is_zero_while_suspended() {
+        let with_vram = |busy, used| GpuSample {
+            vram_used: Some(used),
+            vram_total: Some(400),
+            ..gpu("card1", RuntimeStatus::Active, Some(busy))
+        };
         let mut tracker = Tracker::default();
         let t0 = Instant::now();
         tracker.ingest(
@@ -780,7 +804,7 @@ mod tests {
             Sample {
                 gpus: vec![
                     gpu("card0", RuntimeStatus::Suspended, None),
-                    gpu("card1", RuntimeStatus::Active, Some(40)),
+                    with_vram(40, 100),
                 ],
                 ..Sample::default()
             },
@@ -790,11 +814,18 @@ mod tests {
             .history
             .gpus
             .iter()
-            .map(|(card, h)| (card.as_str(), h.iter().collect::<Vec<_>>()))
+            .map(|h| {
+                let values = |h: &History| h.iter().collect::<Vec<_>>();
+                (h.card.as_str(), values(&h.busy), values(&h.vram))
+            })
             .collect();
+        // VRAM without a reading reads 0.
         assert_eq!(
             histories,
-            [("card0", vec![0.0, 0.0]), ("card1", vec![30.0, 40.0])]
+            [
+                ("card0", vec![0.0, 0.0], vec![0.0, 0.0]),
+                ("card1", vec![30.0, 40.0], vec![0.0, 25.0])
+            ]
         );
         assert_eq!(stats.first_awake_gpu().unwrap().card, "card1");
     }

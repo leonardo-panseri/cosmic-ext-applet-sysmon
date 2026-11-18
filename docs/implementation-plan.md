@@ -177,7 +177,8 @@ one column. The popup resizes in place; the compositor slides it along the panel
 1. **CPU header:** big total %, uptime, thread count, load average, package temp; 2-min graph;
    per-core bars (red above 85 %).
 2. **Memory:** in use and swap: used / total, %; a 2-min graph (in use above the line, swap below).
-3. **GPU:** one block per GPU (NVIDIA first). Each shows name, load · temp · power, a 2-min graph, and VRAM used / total.
+3. **GPU:** one block per GPU (NVIDIA first). Each shows name, load · temp · power, VRAM used / total, and while awake
+   a 2-min graph (load above the line, VRAM below).
    Suspended cards as in D4. The integrated GPU's "VRAM" is `mem_info_vram_total` (the carve-out).
 4. **Network:** download/upload, a 2-min graph (download above the line, upload below), per interface if more than one.
 5. **Disk:** one block per physical disk: its model (`/sys/block/<disk>/device/model`, which for NVMe is the
