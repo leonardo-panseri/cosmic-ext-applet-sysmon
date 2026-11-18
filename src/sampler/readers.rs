@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use sysmon_proto::{Mount, NvidiaState, NvmlSample};
 
 use super::nvml_schedule::{IDLE_INTERVAL, NvmlSchedule, Tick};
-use super::stats::{DiskLayout, DriveTemp, GpuSample, Sample};
+use super::stats::{DiskLayout, DriveTemp, GpuSample, Processes, Sample};
 use crate::config::VramCache;
 use crate::probe_client::{self, Probe};
 use crate::sources::block::BlockTopology;
@@ -507,13 +507,16 @@ impl Readers {
             drive_disks,
             gpus: self.cards.iter_mut().map(|c| c.sample(failed)).collect(),
             mounts: Vec::new(),
-            processes: None,
+            processes: Processes::Pending,
             disk_layout: Arc::clone(&self.disk_layout),
         };
         // After the counters, so a slow probe doesn't skew the rates measured from `now`.
         sample.mounts = self.mounts(now);
         if wants.processes {
-            sample.processes = self.probe.processes();
+            sample.processes = self
+                .probe
+                .processes()
+                .map_or(Processes::Unavailable, Processes::Top);
         }
         self.nvidia(now, &wants.nvml, &mut sample.gpus);
         sample
@@ -1186,10 +1189,10 @@ mod tests {
         let t0 = Instant::now();
         let s = Duration::from_secs;
         let closed = readers.read(t0, &Wants::default());
-        assert!(closed.processes.is_none());
+        assert_eq!(closed.processes, Processes::Pending);
         readers.read(t0 + s(2), &Wants::default());
         let open = readers.read(t0 + s(4), &OPEN);
-        assert!(open.processes.is_some());
+        assert!(matches!(open.processes, Processes::Top(_)));
         readers.read(t0 + s(30), &Wants::default());
         assert_eq!(
             *recorder.0.lock().unwrap(),
@@ -1206,7 +1209,7 @@ mod tests {
         let mut readers = Readers::new(Box::new(Unavailable), VramCache::default());
         let sample = readers.read(Instant::now(), &OPEN);
         assert_eq!(sample.mounts, []);
-        assert!(sample.processes.is_none());
+        assert_eq!(sample.processes, Processes::Unavailable);
     }
 
     #[test]

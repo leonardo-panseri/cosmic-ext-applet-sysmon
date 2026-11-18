@@ -38,7 +38,7 @@ pub struct Sample {
     /// The host's real mounts, from the probe (D2: every 30 s); empty without a probe.
     pub mounts: Vec<Mount>,
     /// The top processes, from the probe; only in the open tier.
-    pub processes: Option<TopProcesses>,
+    pub processes: Processes,
     /// What discovery found about the disks, to group the above by physical disk.
     pub disk_layout: Arc<DiskLayout>,
 }
@@ -50,6 +50,17 @@ pub struct DiskLayout {
     pub models: HashMap<String, String>,
     /// Which disk each block device is on.
     pub topology: BlockTopology,
+}
+
+/// The top processes, as far as they are known.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Processes {
+    /// Not read: the closed tier, or the popup's first scan hasn't answered yet.
+    #[default]
+    Pending,
+    /// The probe didn't answer.
+    Unavailable,
+    Top(TopProcesses),
 }
 
 /// An `nvme` drive's temperature.
@@ -266,8 +277,7 @@ pub struct Stats {
     pub disks: Vec<DiskStats>,
     /// The mounts of [`Self::mounts`] on no disk of [`Self::disks`].
     pub other_mounts: Vec<Mount>,
-    /// `None` in the closed tier, or without a probe.
-    pub processes: Option<TopProcesses>,
+    pub processes: Processes,
     pub history: Histories,
     /// The extremes since start; each GPU's are in [`GpuSample::extremes`].
     pub extremes: Extremes,

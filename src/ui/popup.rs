@@ -27,11 +27,11 @@ use cosmic::widget::{self, icon};
 use crate::app::Message;
 use crate::fl;
 use crate::panel::{LimitKind, PanelSettings, format};
-use crate::sampler::stats::{DiskStats, GpuSample, MinMax, Stats, share};
+use crate::sampler::stats::{DiskStats, GpuSample, MinMax, Processes, Stats, share};
 use crate::ui::columns::Columns;
 use crate::ui::settings::{self, SettingsModels};
 use crate::ui::{builder, graph, icons};
-use sysmon_proto::{Mount, Process};
+use sysmon_proto::{MAX_TOP, Mount, Process, TopProcesses};
 
 /// The width of the value column of a stat row: "212G / 928G".
 const VALUE_WIDTH: f32 = 104.0;
@@ -475,34 +475,51 @@ fn mount_rows<'a>(mount: &'a Mount, settings: &PanelSettings) -> Element<'a, Mes
         .into()
 }
 
-/// The top processes by CPU and by memory, side by side.
+/// The top processes by CPU and by memory, side by side. Until the popup's first scan answers
+/// (the probe takes a 250 ms CPU baseline), a ghost of the same height holds their place, so
+/// the page doesn't shift when they arrive.
 fn processes(stats: &Stats) -> Element<'_, Message> {
     let body: Element<'_, Message> = match &stats.processes {
-        Some(top) => widget::Row::new()
-            .spacing(cosmic::theme::spacing().space_m)
-            .push(process_column(fl!("processes-cpu"), &top.by_cpu, |p| {
-                format::fine_percent(p.cpu)
-            }))
-            .push(process_column(
-                fl!("processes-memory"),
-                &top.by_memory,
-                |p| format::size(p.rss),
-            ))
-            .into(),
-        None => muted(widget::text::body(fl!("no-processes"))).into(),
+        Processes::Top(top) => process_columns(Some(top)),
+        Processes::Pending => process_columns(None),
+        Processes::Unavailable => muted(widget::text::body(fl!("no-processes"))).into(),
     };
     section(fl!("section-processes"), vec![body])
 }
 
+/// The CPU and memory columns of `top`, or their ghosts without it.
+fn process_columns(top: Option<&TopProcesses>) -> Element<'_, Message> {
+    widget::Row::new()
+        .spacing(cosmic::theme::spacing().space_m)
+        .push(process_column(
+            fl!("processes-cpu"),
+            top.map(|t| t.by_cpu.as_slice()),
+            |p| format::fine_percent(p.cpu),
+        ))
+        .push(process_column(
+            fl!("processes-memory"),
+            top.map(|t| t.by_memory.as_slice()),
+            |p| format::size(p.rss),
+        ))
+        .into()
+}
+
+/// A column headed `title`: the processes of `list` with their value, or [`MAX_TOP`] ghost rows
+/// without one.
 fn process_column(
     title: String,
-    list: &[Process],
+    list: Option<&[Process]>,
     value: impl Fn(&Process) -> String,
 ) -> Element<'_, Message> {
     let mut column = widget::Column::new()
         .spacing(cosmic::theme::spacing().space_xxxs)
         .width(Length::FillPortion(1))
         .push(muted(widget::text::caption_heading(title)));
+    let Some(list) = list else {
+        return column
+            .extend(GHOST_NAME_PORTIONS.iter().map(|&p| ghost_row(p)))
+            .into();
+    };
     for process in list {
         column = column.push(
             widget::Row::new()
@@ -512,6 +529,49 @@ fn process_column(
         );
     }
     column.into()
+}
+
+/// How much of a ghost row its name bar takes, in tenths, one per row: uneven, like names.
+const GHOST_NAME_PORTIONS: [u16; MAX_TOP as usize] = [7, 5, 6, 4, 5];
+/// A ghost bar's height and its value bar's width.
+const GHOST_BAR_HEIGHT: f32 = 8.0;
+const GHOST_VALUE_WIDTH: f32 = 32.0;
+/// A ghost bar's opacity, relative to the text colour.
+const GHOST_ALPHA: f32 = 0.12;
+
+/// A process row's ghost: a name bar `name` tenths wide and a value bar, as high as a row of
+/// body text (a no-break space keeps that height; a zero-width text has none).
+fn ghost_row<'a>(name: u16) -> Element<'a, Message> {
+    let bars = widget::Row::new()
+        .spacing(cosmic::theme::spacing().space_xxs)
+        .push(ghost_bar(Length::FillPortion(name)))
+        .push(widget::Space::new().width(Length::FillPortion(10 - name)))
+        .push(ghost_bar(Length::Fixed(GHOST_VALUE_WIDTH)));
+    // The space last, where its few pixels of width don't show.
+    widget::Row::new()
+        .align_y(Alignment::Center)
+        .push(bars.width(Length::Fill))
+        .push(widget::text::body("\u{a0}"))
+        .into()
+}
+
+fn ghost_bar<'a>(width: Length) -> Element<'a, Message> {
+    widget::container(widget::Space::new())
+        .width(width)
+        .height(Length::Fixed(GHOST_BAR_HEIGHT))
+        .style(|theme: &cosmic::Theme| {
+            let mut color: Color = theme.cosmic().background(theme.transparent).on.into();
+            color.a *= GHOST_ALPHA;
+            widget::container::Style {
+                background: Some(color.into()),
+                border: cosmic::iced::Border {
+                    radius: (GHOST_BAR_HEIGHT / 2.0).into(),
+                    ..cosmic::iced::Border::default()
+                },
+                ..widget::container::Style::default()
+            }
+        })
+        .into()
 }
 
 /// The two equal buttons under the stats page.

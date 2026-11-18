@@ -47,7 +47,7 @@ use crate::sampler::history::{HISTORY_LEN, History};
 use crate::sampler::rates::PairRate;
 use crate::sampler::stats::{
     DeviceRate, DiskStats, DriveTemp, Extremes, GpuExtremes, GpuSample, Histories,
-    InterfaceHistory, MinMax, Stats,
+    InterfaceHistory, MinMax, Processes, Stats,
 };
 use crate::sources::drm::RuntimeStatus;
 use crate::sources::loadavg::LoadAvg;
@@ -629,7 +629,7 @@ pub fn fixture() -> Stats {
         mounts: mounts(),
         disks: disks(),
         other_mounts: Vec::new(),
-        processes: Some(processes()),
+        processes: Processes::Top(processes()),
         history,
         extremes: Extremes {
             cpu: Some(range(3.0, 97.0)),
