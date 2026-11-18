@@ -11,15 +11,19 @@ the Omarchy plugin [navjottomer.sysmon][omarchy-sysmon] (design only; no code is
 
 - **Panel button:** one or two rows (CPU, RAM, GPU, Disk or CPU °C) with download and upload rates, in the
   Stacked, One line or Compact layout. Vertical panels use Compact.
-- **Warnings:** a row turns red when its value crosses a limit (85 °C and 90 % by default). A problem that
-  isn't on the panel button, such as a full filesystem or a hot NVMe drive, turns the whole button red. The
-  tooltip lists what's wrong.
+- **Warnings:** a row turns red when its value crosses a limit. Each warning has its own limit and switch:
+  CPU and GPU temperature (85 °C), memory and any filesystem (90 %), swap (50 %, off) and VRAM (90 %,
+  off), and NVMe temperature (each drive's rated limit, or one of your own). A problem that isn't on the
+  panel button, such as a full filesystem or a hot NVMe drive, turns the whole button red. The tooltip
+  lists what's wrong.
 - **Popup:** total and per-core CPU load, uptime, load average and temperature; memory and swap; every GPU
   with load, temperature, power and VRAM; each network interface; disk throughput, every mounted
   filesystem and NVMe temperatures; the top 5 processes by CPU and by memory. CPU, GPU and network have
   2-minute graphs.
 - **Settings page** in the popup. Changes apply at once and are kept.
-- **Right click** on the panel button, or **Process monitor** in the popup, opens COSMIC's System Monitor.
+- **Right click** on the panel button, or **Process monitor** in the popup, opens COSMIC's System Monitor,
+  or the app you choose in the settings: a desktop ID (`io.missioncenter.MissionCenter`) or a command
+  (`kitty -e btop`).
 
 ## How it stays cheap
 

@@ -7,15 +7,15 @@
 
 pub mod format;
 mod hysteresis;
+mod limits;
 
 pub use hysteresis::PanelHysteresis;
-
-use std::ops::RangeInclusive;
+pub use limits::{Limit, LimitKind, NVME_STEP_FROM, NvmeLimit, Unit};
 
 use cosmic::cosmic_config::{self, CosmicConfigEntry, cosmic_config_derive::CosmicConfigEntry};
 use serde::{Deserialize, Serialize};
 
-use crate::sampler::stats::Stats;
+use crate::sampler::stats::{DriveTemp, Stats, share};
 
 /// How the panel button lays out its rows (§2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,13 +68,13 @@ impl RowKind {
     }
 }
 
-/// The temperatures the settings page offers as `warn_temp`, °C.
-pub const WARN_TEMP_RANGE: RangeInclusive<u8> = 50..=110;
-/// The shares the settings page offers as `warn_usage`, %.
-pub const WARN_USAGE_RANGE: RangeInclusive<u8> = 50..=100;
+/// The process monitor launched by default: COSMIC's System Monitor, by desktop id (D5).
+pub const DEFAULT_PROCESS_MONITOR: &str = "com.system76.CosmicMonitor";
 
-/// The panel button's settings (§2.3), stored with cosmic-config as one key per field in
-/// `~/.config/cosmic/<app id>/v1/`. Changed on the popup's settings page.
+/// The applet's settings (§2.3), stored with cosmic-config as one key per field in
+/// `~/.config/cosmic/<app id>/v1/`. Changed on the popup's settings page. Before the `warn_*`
+/// limits there were only `warn_temp` and `warn_usage`; [`crate::config`] reads them as the
+/// defaults of the limits they were split into.
 #[derive(Debug, Clone, PartialEq, Eq, CosmicConfigEntry)]
 #[version = 1]
 pub struct PanelSettings {
@@ -83,10 +83,23 @@ pub struct PanelSettings {
     pub bottom: RowKind,
     /// Whether the network rates are shown.
     pub network: bool,
-    /// CPU and GPU temperatures at or above this warn, °C.
-    pub warn_temp: u8,
-    /// Memory or a filesystem at or above this share warns, %.
-    pub warn_usage: u8,
+    /// The CPU package temperature, °C.
+    pub warn_cpu_temp: Limit,
+    /// Any GPU's temperature, °C.
+    pub warn_gpu_temp: Limit,
+    /// Memory in use, %.
+    pub warn_memory: Limit,
+    /// Swap in use, %.
+    pub warn_swap: Limit,
+    /// Any filesystem's used space, %.
+    pub warn_disk: Limit,
+    /// Any GPU's VRAM in use, %.
+    pub warn_vram: Limit,
+    /// Any `NVMe` drive's temperature, °C.
+    pub warn_nvme: NvmeLimit,
+    /// What right click and the popup's **Process monitor** button open: a desktop id or a
+    /// command line ([`crate::launch`]).
+    pub process_monitor: String,
 }
 
 impl Default for PanelSettings {
@@ -96,8 +109,14 @@ impl Default for PanelSettings {
             top: RowKind::Cpu,
             bottom: RowKind::Memory,
             network: true,
-            warn_temp: 85,
-            warn_usage: 90,
+            warn_cpu_temp: Limit::on(85),
+            warn_gpu_temp: Limit::on(85),
+            warn_memory: Limit::on(90),
+            warn_swap: Limit::off(50),
+            warn_disk: Limit::on(90),
+            warn_vram: Limit::off(90),
+            warn_nvme: NvmeLimit::default(),
+            process_monitor: DEFAULT_PROCESS_MONITOR.to_owned(),
         }
     }
 }
@@ -106,14 +125,73 @@ impl PanelSettings {
     /// These settings with the limits inside the ranges the settings page offers, for values
     /// written to the config by hand.
     #[must_use]
-    pub fn clamped(self) -> Self {
-        let clamp =
-            |value: u8, range: &RangeInclusive<u8>| value.clamp(*range.start(), *range.end());
-        Self {
-            warn_temp: clamp(self.warn_temp, &WARN_TEMP_RANGE),
-            warn_usage: clamp(self.warn_usage, &WARN_USAGE_RANGE),
-            ..self
+    pub fn clamped(mut self) -> Self {
+        for kind in LimitKind::ALL {
+            if let Some(limit) = self.limit_mut(kind) {
+                limit.at = kind.clamp(limit.at);
+            }
         }
+        self.warn_nvme.at = self.warn_nvme.at.map(|at| LimitKind::Nvme.clamp(at));
+        self
+    }
+
+    /// The limit of `kind`; `None` for [`LimitKind::Nvme`], which is [`Self::warn_nvme`].
+    #[must_use]
+    pub fn limit(&self, kind: LimitKind) -> Option<Limit> {
+        match kind {
+            LimitKind::CpuTemp => Some(self.warn_cpu_temp),
+            LimitKind::GpuTemp => Some(self.warn_gpu_temp),
+            LimitKind::Memory => Some(self.warn_memory),
+            LimitKind::Swap => Some(self.warn_swap),
+            LimitKind::Disk => Some(self.warn_disk),
+            LimitKind::Vram => Some(self.warn_vram),
+            LimitKind::Nvme => None,
+        }
+    }
+
+    /// The limit of `kind`, to change it; `None` for [`LimitKind::Nvme`].
+    pub fn limit_mut(&mut self, kind: LimitKind) -> Option<&mut Limit> {
+        match kind {
+            LimitKind::CpuTemp => Some(&mut self.warn_cpu_temp),
+            LimitKind::GpuTemp => Some(&mut self.warn_gpu_temp),
+            LimitKind::Memory => Some(&mut self.warn_memory),
+            LimitKind::Swap => Some(&mut self.warn_swap),
+            LimitKind::Disk => Some(&mut self.warn_disk),
+            LimitKind::Vram => Some(&mut self.warn_vram),
+            LimitKind::Nvme => None,
+        }
+    }
+
+    /// Whether the limit of `kind` is on.
+    #[must_use]
+    pub fn is_on(&self, kind: LimitKind) -> bool {
+        self.limit(kind).map_or(self.warn_nvme.on, |limit| limit.on)
+    }
+
+    /// Whether `value`, °C or %, warns under the limit of `kind`. Never for
+    /// [`LimitKind::Nvme`], whose limit depends on the drive: see [`Self::nvme_hot`].
+    #[must_use]
+    pub fn warns(&self, kind: LimitKind, value: f32) -> bool {
+        self.limit(kind)
+            .and_then(Limit::active)
+            .is_some_and(|at| value >= f32::from(at))
+    }
+
+    /// The limit `drive` warns at, °C: the override, else the drive's own rated limit; `None`
+    /// while the `NVMe` limit is off, or without either.
+    #[must_use]
+    pub fn nvme_limit(&self, drive: &DriveTemp) -> Option<f32> {
+        if !self.warn_nvme.on {
+            return None;
+        }
+        self.warn_nvme.at.map(f32::from).or(drive.limit)
+    }
+
+    /// Whether `drive` is at or above [its limit](Self::nvme_limit).
+    #[must_use]
+    pub fn nvme_hot(&self, drive: &DriveTemp) -> bool {
+        self.nvme_limit(drive)
+            .is_some_and(|limit| drive.celsius >= limit)
     }
 
     /// The layout actually used: vertical panels only fit [`Layout::Compact`].
@@ -140,18 +218,6 @@ impl PanelSettings {
     pub fn shows_rates(&self, layout: Layout) -> bool {
         self.network && layout != Layout::Compact
     }
-
-    /// Whether a CPU or GPU temperature warns.
-    #[must_use]
-    pub fn hot(&self, celsius: f32) -> bool {
-        celsius >= f32::from(self.warn_temp)
-    }
-
-    /// Whether memory or a filesystem this full, %, warns.
-    #[must_use]
-    pub fn full(&self, percent: f32) -> bool {
-        percent >= f32::from(self.warn_usage)
-    }
 }
 
 /// A value at or above its limit (§2.1), with both rounded to whole units for the tooltip.
@@ -169,31 +235,44 @@ pub enum Warning {
     },
     /// Memory in use, %.
     Memory { percent: i32, limit: i32 },
+    /// Swap in use, %.
+    Swap { percent: i32, limit: i32 },
     /// A filesystem, by mount point; % full.
     Filesystem {
         mount: String,
         percent: i32,
         limit: i32,
     },
-    /// An `nvme` drive, by name, against its own rated limit; °C.
+    /// A GPU's VRAM in use, by DRM card, with its model when known; %.
+    Vram {
+        card: String,
+        name: Option<String>,
+        percent: i32,
+        limit: i32,
+    },
+    /// An `nvme` drive, by name; °C. `rated` when the limit is the drive's own rated limit,
+    /// not the settings' override.
     Nvme {
         drive: String,
         celsius: i32,
         limit: i32,
+        rated: bool,
     },
 }
 
 impl Warning {
     /// Whether a row showing `kind` owns this warning, so it takes the warning's colour, as in
-    /// the reference: both CPU rows own the CPU temperature; the GPU row the temperature of the
-    /// GPU it shows, the card `gpu_card`; the Disk row the root filesystem; the Memory row memory.
-    /// `NVMe` drives have no row.
+    /// the reference: both CPU rows own the CPU temperature; the GPU row the temperature and the
+    /// VRAM of the GPU it shows, the card `gpu_card`; the Memory row memory and swap; the Disk row
+    /// the root filesystem. `NVMe` drives have no row.
     #[must_use]
     pub fn colours(&self, kind: RowKind, gpu_card: Option<&str>) -> bool {
         match self {
             Self::CpuTemp { .. } => matches!(kind, RowKind::Cpu | RowKind::CpuTemp),
-            Self::GpuTemp { card, .. } => kind == RowKind::Gpu && gpu_card == Some(card.as_str()),
-            Self::Memory { .. } => kind == RowKind::Memory,
+            Self::GpuTemp { card, .. } | Self::Vram { card, .. } => {
+                kind == RowKind::Gpu && gpu_card == Some(card.as_str())
+            }
+            Self::Memory { .. } | Self::Swap { .. } => kind == RowKind::Memory,
             Self::Filesystem { mount, .. } => kind == RowKind::Disk && mount == "/",
             Self::Nvme { .. } => false,
         }
@@ -211,43 +290,57 @@ fn whole(value: f32) -> i32 {
 /// Every warning `stats` raises under `settings`' limits.
 #[must_use]
 pub fn warnings(stats: &Stats, settings: &PanelSettings) -> Vec<Warning> {
-    let temp_limit = i32::from(settings.warn_temp);
-    let usage_limit = i32::from(settings.warn_usage);
+    // The value, if it warns under the limit of `kind`, with the limit; both whole.
+    let over = |kind: LimitKind, value: Option<f32>| {
+        let value = value.filter(|&v| settings.warns(kind, v))?;
+        let limit = settings.limit(kind).map_or(0, |l| i32::from(l.at));
+        Some((whole(value), limit))
+    };
     let mut warnings = Vec::new();
-    if let Some(celsius) = stats.cpu_temp.filter(|&c| settings.hot(c)) {
-        warnings.push(Warning::CpuTemp {
-            celsius: whole(celsius),
-            limit: temp_limit,
-        });
+    if let Some((celsius, limit)) = over(LimitKind::CpuTemp, stats.cpu_temp) {
+        warnings.push(Warning::CpuTemp { celsius, limit });
     }
     warnings.extend(stats.gpus.iter().filter_map(|g| {
-        let celsius = g.celsius.filter(|&c| settings.hot(c))?;
+        let (celsius, limit) = over(LimitKind::GpuTemp, g.celsius)?;
         Some(Warning::GpuTemp {
             card: g.card.clone(),
             name: g.name.clone(),
-            celsius: whole(celsius),
-            limit: temp_limit,
+            celsius,
+            limit,
         })
     }));
-    if let Some(percent) = stats.memory_percent().filter(|&p| settings.full(p)) {
-        warnings.push(Warning::Memory {
-            percent: whole(percent),
-            limit: usage_limit,
-        });
+    warnings.extend(stats.gpus.iter().filter_map(|g| {
+        let used = g.vram_used.zip(g.vram_total);
+        let (percent, limit) = over(LimitKind::Vram, used.and_then(|(u, t)| share(u, t)))?;
+        Some(Warning::Vram {
+            card: g.card.clone(),
+            name: g.name.clone(),
+            percent,
+            limit,
+        })
+    }));
+    if let Some((percent, limit)) = over(LimitKind::Memory, stats.memory_percent()) {
+        warnings.push(Warning::Memory { percent, limit });
+    }
+    let swap = stats.mem.and_then(|m| share(m.swap_used(), m.swap_total));
+    if let Some((percent, limit)) = over(LimitKind::Swap, swap) {
+        warnings.push(Warning::Swap { percent, limit });
     }
     warnings.extend(stats.mounts.iter().filter_map(|m| {
-        let percent = m.used_percent().filter(|&p| settings.full(p))?;
+        let (percent, limit) = over(LimitKind::Disk, m.used_percent())?;
         Some(Warning::Filesystem {
             mount: m.mount_point.clone(),
-            percent: whole(percent),
-            limit: usage_limit,
+            percent,
+            limit,
         })
     }));
-    warnings.extend(stats.drives.iter().filter(|d| d.hot()).filter_map(|d| {
+    warnings.extend(stats.drives.iter().filter_map(|d| {
+        let limit = settings.nvme_limit(d).filter(|&l| d.celsius >= l)?;
         Some(Warning::Nvme {
             drive: d.name.clone(),
             celsius: whole(d.celsius),
-            limit: whole(d.limit?),
+            limit: whole(limit),
+            rated: settings.warn_nvme.at.is_none(),
         })
     }));
     warnings
@@ -512,7 +605,8 @@ mod tests {
                 Warning::Nvme {
                     drive: "Fast SSD".into(),
                     celsius: 70,
-                    limit: 70
+                    limit: 70,
+                    rated: true,
                 },
             ]
         );
@@ -544,8 +638,8 @@ mod tests {
         };
         assert_eq!(warnings(&stats, &PanelSettings::default()), Vec::new());
         let strict = PanelSettings {
-            warn_temp: 70,
-            warn_usage: 60,
+            warn_cpu_temp: Limit::on(70),
+            warn_memory: Limit::on(60),
             ..PanelSettings::default()
         };
         assert_eq!(
@@ -560,6 +654,41 @@ mod tests {
                     limit: 60
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn cpu_and_gpu_temperatures_have_their_own_limits() {
+        let stats = Stats {
+            cpu_temp: Some(72.0),
+            gpus: vec![amd_gpu(10, 72.0)],
+            ..Stats::default()
+        };
+        let settings = PanelSettings {
+            warn_cpu_temp: Limit::on(70),
+            warn_gpu_temp: Limit::on(75),
+            ..PanelSettings::default()
+        };
+        assert_eq!(
+            warnings(&stats, &settings),
+            [Warning::CpuTemp {
+                celsius: 72,
+                limit: 70
+            }]
+        );
+        let settings = PanelSettings {
+            warn_cpu_temp: Limit { on: false, at: 70 },
+            warn_gpu_temp: Limit::on(72),
+            ..PanelSettings::default()
+        };
+        assert_eq!(
+            warnings(&stats, &settings),
+            [Warning::GpuTemp {
+                card: "card1".into(),
+                name: None,
+                celsius: 72,
+                limit: 72
+            }]
         );
     }
 
@@ -737,13 +866,199 @@ mod tests {
     #[test]
     fn hand_written_limits_are_clamped_to_the_settings_page_ranges() {
         let wild = PanelSettings {
-            warn_temp: 200,
-            warn_usage: 10,
+            warn_cpu_temp: Limit::on(200),
+            warn_memory: Limit::off(10),
+            warn_swap: Limit::on(5),
+            warn_nvme: NvmeLimit {
+                on: true,
+                at: Some(250),
+            },
             ..PanelSettings::default()
         };
         let clamped = wild.clamped();
-        assert_eq!((clamped.warn_temp, clamped.warn_usage), (110, 50));
+        assert_eq!(clamped.warn_cpu_temp, Limit::on(110));
+        assert_eq!(clamped.warn_memory, Limit::off(50));
+        assert_eq!(clamped.warn_swap, Limit::on(10));
+        assert_eq!(clamped.warn_nvme.at, Some(100));
         assert_eq!(PanelSettings::default().clamped(), PanelSettings::default());
+    }
+
+    #[test]
+    fn swap_and_vram_warn_only_once_turned_on() {
+        let stats = Stats {
+            mem: Some(MemInfo {
+                mem_total: 100,
+                mem_available: 50,
+                swap_total: 100,
+                swap_free: 40,
+            }),
+            gpus: vec![GpuSample {
+                vram_used: Some(95),
+                vram_total: Some(100),
+                ..nvidia_gpu(RuntimeStatus::Active, Some(10), Some(50.0))
+            }],
+            ..Stats::default()
+        };
+        assert_eq!(warnings(&stats, &PanelSettings::default()), Vec::new());
+        let on = PanelSettings {
+            warn_swap: Limit::on(50),
+            warn_vram: Limit::on(90),
+            ..PanelSettings::default()
+        };
+        assert_eq!(
+            warnings(&stats, &on),
+            [
+                Warning::Vram {
+                    card: "card0".into(),
+                    name: Some("RTX 4060".into()),
+                    percent: 95,
+                    limit: 90
+                },
+                Warning::Swap {
+                    percent: 60,
+                    limit: 50
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn no_swap_and_a_suspended_card_never_warn() {
+        let stats = Stats {
+            mem: Some(memory(10)),
+            gpus: vec![GpuSample {
+                vram_used: Some(0),
+                vram_total: Some(8 << 30),
+                ..nvidia_gpu(RuntimeStatus::Suspended, None, None)
+            }],
+            ..Stats::default()
+        };
+        let strict = PanelSettings {
+            warn_swap: Limit::on(10),
+            warn_vram: Limit::on(50),
+            ..PanelSettings::default()
+        };
+        assert_eq!(warnings(&stats, &strict), Vec::new());
+    }
+
+    #[test]
+    fn memory_and_disk_have_their_own_limits() {
+        let stats = Stats {
+            mem: Some(memory(80)),
+            mounts: vec![mount("/", 80)],
+            ..Stats::default()
+        };
+        let settings = PanelSettings {
+            warn_memory: Limit::off(60),
+            warn_disk: Limit::on(75),
+            ..PanelSettings::default()
+        };
+        assert_eq!(
+            warnings(&stats, &settings),
+            [Warning::Filesystem {
+                mount: "/".into(),
+                percent: 80,
+                limit: 75
+            }]
+        );
+    }
+
+    fn drive(name: &str, celsius: f32, rated: Option<f32>) -> DriveTemp {
+        DriveTemp {
+            name: name.into(),
+            celsius,
+            limit: rated,
+        }
+    }
+
+    #[test]
+    fn an_nvme_override_replaces_every_drive_s_rated_limit() {
+        let stats = Stats {
+            drives: vec![
+                drive("Rated", 72.0, Some(80.0)),
+                drive("Unrated", 66.0, None),
+            ],
+            ..Stats::default()
+        };
+        assert_eq!(warnings(&stats, &PanelSettings::default()), Vec::new());
+        let lower = PanelSettings {
+            warn_nvme: NvmeLimit {
+                on: true,
+                at: Some(65),
+            },
+            ..PanelSettings::default()
+        };
+        let nvme = |name: &str, celsius| Warning::Nvme {
+            drive: name.into(),
+            celsius,
+            limit: 65,
+            rated: false,
+        };
+        assert_eq!(
+            warnings(&stats, &lower),
+            [nvme("Rated", 72), nvme("Unrated", 66)]
+        );
+        let off = PanelSettings {
+            warn_nvme: NvmeLimit {
+                on: false,
+                at: Some(65),
+            },
+            ..PanelSettings::default()
+        };
+        assert_eq!(warnings(&stats, &off), Vec::new());
+        let rated_off = PanelSettings {
+            warn_nvme: NvmeLimit {
+                on: false,
+                at: None,
+            },
+            ..PanelSettings::default()
+        };
+        let hot = Stats {
+            drives: vec![drive("Rated", 85.0, Some(80.0))],
+            ..Stats::default()
+        };
+        assert_eq!(warnings(&hot, &rated_off), Vec::new());
+    }
+
+    #[test]
+    fn swap_colours_the_memory_row_and_vram_the_gpu_row_of_its_card() {
+        let swapping = summary(&Stats {
+            mem: Some(MemInfo {
+                mem_total: 100,
+                mem_available: 50,
+                swap_total: 100,
+                swap_free: 10,
+            }),
+            ..Stats::default()
+        });
+        assert_eq!(swapping.warnings, Vec::new(), "swap is off by default");
+        let settings = PanelSettings {
+            top: RowKind::Gpu,
+            warn_swap: Limit::on(50),
+            warn_vram: Limit::on(90),
+            ..PanelSettings::default()
+        };
+        let stats = Stats {
+            mem: Some(MemInfo {
+                mem_total: 100,
+                mem_available: 50,
+                swap_total: 100,
+                swap_free: 10,
+            }),
+            gpus: vec![GpuSample {
+                vram_used: Some(95),
+                vram_total: Some(100),
+                ..amd_gpu(20, 50.0)
+            }],
+            ..Stats::default()
+        };
+        let summary = PanelSummary::new(&stats, &settings, Layout::Stacked);
+        assert_eq!(summary.warnings.len(), 2);
+        assert!(summary.row_warns(RowKind::Memory));
+        assert!(summary.row_warns(RowKind::Gpu));
+        assert!(!summary.button_warns(&GPU_ROWS));
+        // Neither row shown: the whole button.
+        assert!(summary.button_warns(&[RowKind::Cpu, RowKind::Disk]));
     }
 
     #[test]

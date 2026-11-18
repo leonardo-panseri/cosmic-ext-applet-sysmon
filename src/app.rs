@@ -88,6 +88,28 @@ impl AppModel {
         }
     }
 
+    /// Makes `change` on the settings page: stores the settings it changes, if any, and applies
+    /// them.
+    fn change_setting(&mut self, change: SettingChange) {
+        let settings = self.models.changed(change, &self.settings);
+        if settings == self.settings {
+            return;
+        }
+        if let Some(config) = &self.config {
+            let mut stored = self.settings.clone();
+            config::store(config, &mut stored, &settings);
+        }
+        config::log("changed", &settings);
+        self.apply_settings(settings);
+    }
+
+    /// Closes the popup, saving what was typed on the settings page.
+    fn close_popup(&mut self, id: Id) -> Task<cosmic::Action<Message>> {
+        self.change_setting(SettingChange::CommitAll);
+        self.popup_changed();
+        destroy_popup(id)
+    }
+
     /// Shows `settings` and tells the sampler, which sends the panel button's new summary at
     /// once if it changes.
     fn apply_settings(&mut self, settings: PanelSettings) {
@@ -189,8 +211,7 @@ impl cosmic::Application for AppModel {
         match message {
             Message::TogglePopup => {
                 if let Some(id) = self.popup.take() {
-                    self.popup_changed();
-                    return destroy_popup(id);
+                    return self.close_popup(id);
                 }
                 let Some(main) = self.core.main_window_id() else {
                     return Task::none();
@@ -211,16 +232,19 @@ impl cosmic::Application for AppModel {
                 return get_popup(popup_settings);
             }
             Message::OpenProcessMonitor => {
-                launch::process_monitor();
+                launch::process_monitor(&self.settings.process_monitor);
                 if let Some(id) = self.popup.take() {
-                    self.popup_changed();
-                    return destroy_popup(id);
+                    return self.close_popup(id);
                 }
             }
-            Message::ShowPage(page) => self.page = page,
+            Message::ShowPage(page) => {
+                self.change_setting(SettingChange::CommitAll);
+                self.page = page;
+            }
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
+                    self.change_setting(SettingChange::CommitAll);
                     self.popup_changed();
                 }
             }
@@ -238,17 +262,13 @@ impl cosmic::Application for AppModel {
                 self.panel = Some(update.panel);
                 self.stats = Some(update.stats);
             }
-            Message::Setting(change) => {
-                let settings = self.models.changed(change, &self.settings);
-                if let Some(config) = &self.config {
-                    let mut stored = self.settings.clone();
-                    config::store(config, &mut stored, &settings);
-                }
-                config::log("changed", &settings);
-                self.apply_settings(settings);
-            }
+            Message::Setting(change) => self.change_setting(change),
             Message::ConfigChanged(settings) => {
-                let settings = settings.clamped();
+                // The watch knows only the current keys: the old limits are read here.
+                let settings = match &self.config {
+                    Some(config) => config::settle(config, settings),
+                    None => settings.clamped(),
+                };
                 if settings != self.settings {
                     config::log("changed elsewhere", &settings);
                 }

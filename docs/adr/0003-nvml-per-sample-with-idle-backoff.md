@@ -58,3 +58,5 @@ Option (b), with a back-off:
 - A card whose `runtime_status` is `unsupported` (runtime PM off) never suspends, so it counts as awake.
 - On 2 s ticks the 15 s idle interval works out to 16 s. A light vsync'd load can read 0 %, so the
   back-off may start while it still runs; that's the rule working as intended.
+- The closed tier also polls an awake NVIDIA card, with this back-off, while its GPU temperature or VRAM
+  warning is enabled (the temperature one is by default), so those warnings fire with the popup closed.

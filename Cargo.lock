@@ -956,6 +956,7 @@ dependencies = [
  "libcosmic",
  "rust-embed",
  "serde",
+ "shlex",
  "sysmon-probe",
  "sysmon-proto",
  "tempfile",

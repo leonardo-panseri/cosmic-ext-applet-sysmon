@@ -19,6 +19,8 @@ i18n-embed-fl = "0.10"
 rust-embed = "8.11"
 # Already in the tree through libcosmic; for the settings stored with cosmic-config (§2.3).
 serde = { version = "1.0", features = ["derive"] }
+# Already in the tree (through `cc`); splits a process monitor command line into words (D5).
+shlex = "2"
 # The probe's protocol, and its logic for the in-process backend outside a Flatpak (§3.2).
 sysmon-probe = { path = "crates/sysmon-probe" }
 sysmon-proto = { path = "crates/sysmon-proto" }

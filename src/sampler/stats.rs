@@ -62,14 +62,6 @@ pub struct DriveTemp {
     pub limit: Option<f32>,
 }
 
-impl DriveTemp {
-    /// Whether the drive is at or above its own rated limit; never without one.
-    #[must_use]
-    pub fn hot(&self) -> bool {
-        self.limit.is_some_and(|limit| self.celsius >= limit)
-    }
-}
-
 /// One DRM card. Its stats are `None` unless the card [may be queried](RuntimeStatus::may_query)
 /// (D3), except an NVIDIA card's VRAM while suspended: 0 used of the cached total (D4).
 #[derive(Debug, Clone, Default, PartialEq)]

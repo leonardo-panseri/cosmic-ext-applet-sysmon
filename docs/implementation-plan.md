@@ -56,7 +56,7 @@ a D-Bus round trip plus a host shell reading every `/proc/<pid>/stat`, on every 
 | NVMe temps (each read is a SMART command) | every 30 s | every 30 s |
 | AMD iGPU sysfs | ✓ | ✓ |
 | dGPU `runtime_status` | ✓ (one small read) | ✓ |
-| dGPU NVML (only when `active`; every 15 s after 3 idle samples, ADR 0003) | only if the panel button shows `gpu` | ✓ |
+| dGPU NVML (only when `active`; every 15 s after 3 idle samples, ADR 0003) | if the panel button shows `gpu` or an NVIDIA warning (GPU temperature, VRAM) is enabled; only when awake, with the ADR 0003 back-off | ✓ |
 | Top processes | – | ✓ (probe) |
 | Mounts + space | every 30 s (probe) | every 30 s (probe) |
 
@@ -103,8 +103,10 @@ and only `Suspended` until the card has been seen awake once. The model name als
 ### D5 — No cosmic-monitor code; launch it instead
 
 cosmic-monitor is GPL-3.0-only and binary-only (no library, no D-Bus). We write our own collectors (MPL-2.0).
-The popup's **Process monitor** button, and right-click on the panel button, launch `com.system76.CosmicMonitor`
-on the host through `flatpak-spawn --host`. A setting to choose another app can come later.
+The popup's **Process monitor** button, and right-click on the panel button, launch the setting `process_monitor`
+on the host through `flatpak-spawn --host`, by default `com.system76.CosmicMonitor`. The setting is a desktop id
+(reverse-DNS, or ending in `.desktop`), launched by a fixed `sh` script with `gio launch` or `gtk-launch`, or a
+command line, split by shell quoting rules (`shlex`) and run without a shell. The value never becomes shell text.
 
 ### D6 — Redraw only when what's on screen changes
 
@@ -149,10 +151,16 @@ On a vertical panel, Stacked and One line become Compact. **Warnings:** a row tu
 colour when its own value crosses a limit. If the problem is something not shown on the panel button, the whole button
 turns that colour, and the tooltip says what's wrong. Left click toggles the popup. Right click opens the process monitor.
 
-Warn when:
-- CPU or GPU temperature ≥ `warn_temp` (85 °C)
-- memory or any filesystem ≥ `warn_usage` (90 %)
-- an NVMe drive ≥ its own rated limit (hwmon `temp*_crit`/`temp*_max`)
+Warn when (each with its own switch and limit; the row that owns it in brackets):
+- CPU temperature ≥ `warn_cpu_temp` (85 °C) [CPU, CPU °C]
+- any GPU temperature ≥ `warn_gpu_temp` (85 °C) [GPU, for the card it shows]
+- any GPU's VRAM in use ≥ `warn_vram` (90 %, off) [GPU, for the card it shows]
+- memory in use ≥ `warn_memory` (90 %) [RAM]
+- swap in use ≥ `warn_swap` (50 %, off) [RAM]
+- any filesystem ≥ `warn_disk` (90 %) [Disk, for `/`]
+- an NVMe drive ≥ `warn_nvme`: its own rated limit (hwmon `temp*_crit`/`temp*_max`) unless overridden [none]
+
+No CPU load warning: a busy CPU is normal and transient, and its temperature already catches a problem.
 
 ### 2.2 Popup (stats page)
 
@@ -185,11 +193,14 @@ Inside the popup, like the reference and like codexbar's panel page:
 - Layout: Stacked / One line / Compact
 - Top row and bottom row: CPU / RAM / GPU / Disk / CPU °C
 - Network speed: toggle
-- Warn at or above: temperature (°C) and memory or disk (% full)
+- Process monitor: a desktop ID or command (D5), with a reset to the default
+- Warn at or above: each warning of §2.1 with a switch and its limit, typed or set with − and +
 - Back
 
-Changes save immediately to cosmic-config and the panel updates live. Defaults: `stacked`, top `cpu`, bottom `memory`,
-network on, 85 °C, 90 %.
+Changes save immediately to cosmic-config and the panel updates live; a typed value on Enter or leaving the field,
+and only if valid (else the field shows the setting again). Defaults: `stacked`, top `cpu`, bottom `memory`, network
+on, the limits of §2.1. The old single `warn_temp` and `warn_usage` keys, if stored, are the defaults of the
+CPU/GPU temperature and memory/disk limits until those are stored themselves; the config version stays 1.
 
 ---
 
@@ -336,4 +347,4 @@ Each phase ends with something runnable and with its checks passing.
 ## 7. Out of scope for v1
 
 Intel GPU load (no simple sysfs counter; fdinfo-based support could follow S1), keyboard navigation in
-the popup, choosing the process monitor app, per-process GPU usage, battery/power draw display.
+the popup, per-process GPU usage, battery/power draw display.

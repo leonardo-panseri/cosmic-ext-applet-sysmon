@@ -25,7 +25,7 @@ use cosmic::widget::{self, icon};
 
 use crate::app::Message;
 use crate::fl;
-use crate::panel::{PanelSettings, format};
+use crate::panel::{LimitKind, PanelSettings, format};
 use crate::sampler::stats::{DiskStats, GpuSample, MinMax, Stats, share};
 use crate::ui::settings::{self, SettingsModels};
 use crate::ui::{graph, icons};
@@ -79,9 +79,8 @@ pub fn view<'a>(
                 .spacing(spacing.space_s)
                 .into()
         }
-        Page::Settings => widget::container(settings::view(models, settings))
-            .padding([0, spacing.space_s])
-            .into(),
+        // Padded inside, around its scrollable area.
+        Page::Settings => settings::view(models, settings),
     };
     widget::container(content)
         .padding([spacing.space_s, 0])
@@ -174,7 +173,7 @@ fn cpu<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> {
         right = right.push(since_start(
             warn_if(
                 widget::text::body(format::celsius(temp)),
-                settings.hot(temp),
+                settings.warns(LimitKind::CpuTemp, temp),
             ),
             stats.extremes.cpu_temp,
             format::celsius,
@@ -204,7 +203,7 @@ fn memory<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message
                 memory_icon(),
                 fl!("in-use"),
                 used_of_total(mem.mem_used(), mem.mem_total),
-                percent.map(|p| (format::percent(p), settings.full(p))),
+                percent.map(|p| (format::percent(p), settings.warns(LimitKind::Memory, p))),
             ),
             stats.extremes.memory,
             format::percent,
@@ -215,7 +214,7 @@ fn memory<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message
             named_icon("media-flash-symbolic"),
             fl!("swap"),
             used_of_total(mem.swap_used(), mem.swap_total),
-            Some((format::percent(swap), false)),
+            Some((format::percent(swap), settings.warns(LimitKind::Swap, swap))),
         ));
         // In use above the line, swap below.
         rows.push(graph::mirrored_percent(
@@ -251,7 +250,10 @@ fn gpus<'a>(stats: &'a Stats, settings: &PanelSettings) -> Element<'a, Message> 
                     memory_icon(),
                     fl!("vram"),
                     used_of_total(used, total),
-                    Some((format::percent(percent), false)),
+                    Some((
+                        format::percent(percent),
+                        settings.warns(LimitKind::Vram, percent),
+                    )),
                 ),
                 gpu.extremes.vram,
                 format::percent,
@@ -286,7 +288,7 @@ fn gpu_header<'a>(gpu: &GpuSample, settings: &PanelSettings) -> Element<'a, Mess
             parts.push(since_start(
                 warn_if(
                     widget::text::body(format::celsius(temp)),
-                    settings.hot(temp),
+                    settings.warns(LimitKind::GpuTemp, temp),
                 ),
                 gpu.extremes.celsius,
                 format::celsius,
@@ -389,7 +391,7 @@ fn disk_block<'a>(disk: &'a DiskStats, settings: &PanelSettings) -> Element<'a, 
             .push(temperature_icon())
             .push(warn_if(
                 widget::text::body(format::celsius(t.celsius)),
-                t.hot(),
+                settings.nvme_hot(t),
             ))
             .into(),
         None => widget::Space::new().into(),
@@ -437,7 +439,7 @@ fn disk_rates<'a>(rate: Option<(f64, f64)>) -> Element<'a, Message> {
 fn mount_rows<'a>(mount: &'a Mount, settings: &PanelSettings) -> Element<'a, Message> {
     let spacing = cosmic::theme::spacing();
     let percent = mount.used_percent();
-    let full = percent.is_some_and(|p| settings.full(p));
+    let full = percent.is_some_and(|p| settings.warns(LimitKind::Disk, p));
     let row = stat_row(
         named_icon("folder-symbolic"),
         mount.mount_point.clone(),
