@@ -178,7 +178,7 @@ fn separator<'a>(size: f32) -> Element<'a, Message> {
         .width(Length::Fixed(1.0))
         .height(Length::Fixed(size))
         .class(cosmic::theme::Container::custom(|theme| {
-            let mut color: Color = theme.cosmic().background(false).on.into();
+            let mut color: Color = theme.cosmic().background(theme.transparent).on.into();
             color.a *= SEPARATOR_ALPHA;
             widget::container::Style {
                 background: Some(color.into()),

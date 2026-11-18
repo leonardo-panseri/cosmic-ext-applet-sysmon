@@ -350,10 +350,11 @@ pub fn view<'a>(
             column(popup_and_warnings).into(),
         ),
     };
-    // As on the stats page, the scroll bar runs in the popup's side padding.
-    let page = widget::container(page).padding([0, spacing.space_s]);
+    // `space_m` from the edges, as the stats page's sections and COSMIC's applets; the scroll
+    // bar runs in that padding.
+    let page = widget::container(page).padding([0, spacing.space_m]);
     let padded =
-        |content: Element<'a, Message>| widget::container(content).padding([0, spacing.space_s]);
+        |content: Element<'a, Message>| widget::container(content).padding([0, spacing.space_m]);
     widget::Column::new()
         .spacing(spacing.space_s)
         .align_x(Alignment::Start)

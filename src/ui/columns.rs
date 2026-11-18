@@ -20,9 +20,11 @@ pub enum Columns {
     Two,
 }
 
-/// The popup's width in one column.
-const COLUMN_WIDTH: f32 = 372.0;
-/// The popup's padding either side of its content: COSMIC's `space_s`.
+/// The popup's width in one column: 340 of content, inset 24 from the edges as COSMIC's applets
+/// inset theirs (`space_m`).
+const COLUMN_WIDTH: f32 = 388.0;
+/// The popup's padding either side of its content, where the dividers end: COSMIC's `space_s`.
+/// The sections are inset a further `space_xxs`.
 const SIDE_PADDING: f32 = 16.0;
 /// The space between two columns: the side padding either side of a divider.
 const COLUMN_GAP: f32 = 2.0 * SIDE_PADDING + 1.0;

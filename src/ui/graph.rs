@@ -161,11 +161,13 @@ struct Colors {
 
 impl Colors {
     fn of(theme: &cosmic::Theme) -> Self {
+        // The popup's own layer: translucent under frosted glass, as libcosmic's widgets pick.
         let cosmic = theme.cosmic();
+        let layer = cosmic.background(theme.transparent);
         Self {
-            background: cosmic.bg_component_color().into(),
+            background: layer.component.base.into(),
             accent: cosmic.accent_color().into(),
-            text: cosmic.on_bg_color().into(),
+            text: layer.on.into(),
             warn: cosmic.destructive_color().into(),
         }
     }

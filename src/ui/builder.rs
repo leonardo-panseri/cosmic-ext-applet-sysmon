@@ -185,9 +185,10 @@ pub fn view<'a>(
             .into(),
         Columns::Two => popup::side_by_side(column(main).into(), column(vec![detail]).into()),
     };
-    let page = widget::container(page).padding([0, spacing.space_s]);
+    // `space_m` from the edges, as the stats page's sections and COSMIC's applets.
+    let page = widget::container(page).padding([0, spacing.space_m]);
     let padded =
-        |content: Element<'a, Message>| widget::container(content).padding([0, spacing.space_s]);
+        |content: Element<'a, Message>| widget::container(content).padding([0, spacing.space_m]);
     widget::Column::new()
         .spacing(spacing.space_s)
         .push(padded(widget::text::title4(fl!("panel-button")).into()))
@@ -213,9 +214,9 @@ fn preview(button: widget::Button<'_, Message>) -> Element<'_, Message> {
         .class(cosmic::theme::Container::custom(|theme| {
             let cosmic = theme.cosmic();
             widget::container::Style {
-                text_color: Some(cosmic.background(false).on.into()),
-                icon_color: Some(cosmic.background(false).on.into()),
-                background: Some(Color::from(cosmic.background(false).base).into()),
+                text_color: Some(cosmic.background(theme.transparent).on.into()),
+                icon_color: Some(cosmic.background(theme.transparent).on.into()),
+                background: Some(Color::from(cosmic.background(theme.transparent).base).into()),
                 border: cosmic::iced::Border {
                     radius: cosmic.corner_radii.radius_s.into(),
                     ..Default::default()
@@ -303,7 +304,7 @@ fn chip<'a>(slot: Slot, item: &Item, stats: &Stats, selected: bool) -> Element<'
     .padding([0, spacing.space_xxxs, 0, 0])
     .class(cosmic::theme::Container::custom(move |theme| {
         let cosmic = theme.cosmic();
-        let component = &cosmic.background(false).component;
+        let component = &cosmic.background(theme.transparent).component;
         widget::container::Style {
             text_color: Some(component.on.into()),
             icon_color: Some(component.on.into()),
@@ -328,7 +329,7 @@ fn chip<'a>(slot: Slot, item: &Item, stats: &Stats, selected: bool) -> Element<'
 fn chip_button() -> cosmic::theme::Button {
     fn style(theme: &cosmic::Theme, hovered: bool) -> widget::button::Style {
         let cosmic = theme.cosmic();
-        let component = &cosmic.background(false).component;
+        let component = &cosmic.background(theme.transparent).component;
         widget::button::Style {
             background: hovered.then(|| Color::from(component.hover).into()),
             border_radius: cosmic.corner_radii.radius_xl.into(),

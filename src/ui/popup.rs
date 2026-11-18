@@ -80,7 +80,7 @@ pub fn view<'a>(
             let body = widget::container(body).padding([0, spacing.space_s]);
             widget::Column::new()
                 .push(widget::container(widget::scrollable(body)).max_height(max_height))
-                .push(widget::container(footer()).padding([0, spacing.space_s]))
+                .push(widget::container(footer()).padding([0, spacing.space_m]))
                 .spacing(spacing.space_s)
                 .into()
         }
@@ -144,13 +144,17 @@ pub(super) fn side_by_side<'a>(
         .into()
 }
 
+/// `sections` between dividers. As in COSMIC's applets, the dividers reach `space_xxs` further
+/// out than the sections: the sections sit `space_m` from the popup's edges, the dividers
+/// `space_s`.
 fn with_dividers(sections: Vec<Element<'_, Message>>) -> Element<'_, Message> {
-    let mut page = widget::Column::new().spacing(cosmic::theme::spacing().space_xs);
+    let spacing = cosmic::theme::spacing();
+    let mut page = widget::Column::new().spacing(spacing.space_xs);
     for (i, section) in sections.into_iter().enumerate() {
         if i > 0 {
             page = page.push(widget::divider::horizontal::default());
         }
-        page = page.push(section);
+        page = page.push(widget::container(section).padding([0, spacing.space_xxs]));
     }
     page.into()
 }
@@ -767,7 +771,7 @@ pub(super) fn one_line(text: widget::Text<'_, cosmic::Theme>) -> widget::Text<'_
 
 pub(super) fn muted(text: widget::Text<'_, cosmic::Theme>) -> widget::Text<'_, cosmic::Theme> {
     text.class(cosmic::theme::Text::Custom(|theme| {
-        let mut color: Color = theme.cosmic().on_bg_color().into();
+        let mut color: Color = theme.cosmic().background(theme.transparent).on.into();
         color.a *= MUTED_ALPHA;
         text_style(theme, color)
     }))
