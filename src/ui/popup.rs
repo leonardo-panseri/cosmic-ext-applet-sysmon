@@ -45,9 +45,6 @@ const MUTED_ALPHA: f32 = 0.65;
 /// How long the cursor rests on a value before its min/max tooltip opens, so sweeping across
 /// the popup doesn't flash them.
 const TOOLTIP_DELAY: Duration = Duration::from_millis(400);
-/// The popup background's least opacity: with frosted glass on, the theme's alpha can leave the
-/// small figures hard to read over a busy desktop.
-const MIN_OPACITY: f32 = 0.9;
 
 /// Which page the popup shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -94,7 +91,6 @@ pub fn view<'a>(
     widget::container(content)
         .padding([spacing.space_s, 0])
         .width(Length::Fixed(columns.width()))
-        .style(backing)
         .into()
 }
 
@@ -631,37 +627,6 @@ fn block_header<'a>(
         .into()
 }
 
-/// A second layer of the popup's background colour over the one the applet's popup container
-/// draws, as alpha that lifts the two together to [`MIN_OPACITY`], with the same rounded border.
-/// Nothing when the background is that opaque already, as without frosted glass.
-fn backing(theme: &cosmic::Theme) -> widget::container::Style {
-    let cosmic = theme.cosmic();
-    let background = cosmic.background(theme.transparent);
-    let mut color: Color = background.base.into();
-    color.a = backing_alpha(color.a, MIN_OPACITY);
-    if color.a <= 0.0 {
-        return widget::container::Style::default();
-    }
-    widget::container::Style {
-        background: Some(color.into()),
-        border: cosmic::iced::Border {
-            radius: cosmic.corner_radii.radius_m.into(),
-            width: 1.0,
-            color: background.divider.into(),
-        },
-        ..widget::container::Style::default()
-    }
-}
-
-/// The alpha of a layer that, over one of alpha `below`, makes the two `target` opaque; 0 when
-/// `below` is that opaque already.
-fn backing_alpha(below: f32, target: f32) -> f32 {
-    if below >= target {
-        return 0.0;
-    }
-    1.0 - (1.0 - target) / (1.0 - below)
-}
-
 /// `content` with a tooltip, at `position`, of the lowest and highest values since start, if
 /// there are any yet.
 fn since_start<'a>(
@@ -842,20 +807,6 @@ mod tests {
         let strip = |s: String| s.replace(['\u{2068}', '\u{2069}'], "");
         assert_eq!(strip(used_of_total(0, 8188 << 20)), "0 / 8G");
         assert_eq!(strip(used_of_total(512 << 20, 8188 << 20)), "512M / 8G");
-    }
-
-    #[test]
-    fn the_backing_lifts_the_background_to_the_least_opacity() {
-        let combined = |below: f32| {
-            let layer = backing_alpha(below, MIN_OPACITY);
-            1.0 - (1.0 - below) * (1.0 - layer)
-        };
-        for below in [0.0, 0.5, 0.75] {
-            assert!((combined(below) - MIN_OPACITY).abs() < 1e-6, "{below}");
-        }
-        // Opaque enough already: no layer.
-        assert!(backing_alpha(0.9, MIN_OPACITY).abs() < f32::EPSILON);
-        assert!(backing_alpha(1.0, MIN_OPACITY).abs() < f32::EPSILON);
     }
 
     #[test]
