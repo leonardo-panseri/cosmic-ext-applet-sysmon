@@ -64,6 +64,8 @@ back = Back
 setting-layout = LAYOUT
 setting-top-row = TOP ROW
 setting-bottom-row = BOTTOM ROW
+# The one-line layout's items, as one list.
+setting-items = ITEMS
 setting-warn = WARN AT OR ABOVE
 layout-stacked = Stacked
 layout-one-line = One line
@@ -101,6 +103,7 @@ builder-hint = Select an item to move it, remove it or choose what it shows. Add
 builder-add = Add an item
 builder-add-top = Add to the top row
 builder-add-bottom = Add to the bottom row
+builder-empty-row = Nothing here yet
 builder-move-left = Move left
 builder-move-right = Move right
 builder-to-top-row = To top row

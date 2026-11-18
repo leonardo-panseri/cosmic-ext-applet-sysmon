@@ -7,8 +7,8 @@ Agreed with the user on 2026-11-18.
 
 - **Two rows of items.** Each row holds 0–4 items, in order. An item is one value with its icon.
 - **Two layouts:** **Stacked** shows the rows one above the other. **One line** joins them into one line,
-  the top row first, with a thin separator between the rows. Switching layouts keeps the rows. Compact is
-  removed.
+  the top row first, as one row of items, closer together than stacked columns. Switching layouts keeps the
+  rows. Compact is removed.
 - **Items** (each an icon and a fixed-width value, D6):
 
   | Item | Value | Parameter |
@@ -58,32 +58,39 @@ The settings page gets a "Panel button" entry that opens a sub-page:
 
 ```
 ┌ Panel button ─────────────────────────────────┐
-│  [ live preview of the button, real values ]  │
 │  Layout   ( Stacked | One line )              │
 │                                               │
-│  TOP ROW                                      │
-│  [▣ CPU 12% ✕] [🌡 CPU 54°C ✕] [↓ 1.2M ✕]   [+]│
-│  BOTTOM ROW                                   │
-│  [▤ RAM 37% ✕] [▭ RTX 4060 33% ✕]           [+]│
+│  TOP ROW                                   [+]│
+│  [▣ CPU 12% ✕] [🌡 CPU 54°C ✕] [↓ 1.2M ✕]     │
+│  BOTTOM ROW                                [+]│
+│  [▤ RAM 37% ✕] [▭ RTX 4060 33% ✕]             │
 │                                               │
 │  Selected: CPU °C   ◀ Move  Move ▶  ⇅ Row      │
 └───────────────────────────────────────────────┘
 ```
 
-- **Live preview:** the top shows the real panel button widget with live values, in the chosen layout.
-- **Chips:** each row is a wrapping row of chips. A chip shows the item's icon, short name and live value.
+- **No preview:** every change shows on the panel button itself at once, so the page doesn't repeat it.
+- **Chips:** each row is a wrapping row of chips under its caption. A chip shows the item's icon, short name
+  and live value.
   - Clicking a chip selects it (highlighted).
   - The bar below the rows then offers **Move left**, **Move right**, **Move to the other row** and
     **Remove**, and shows the item's parameter picker if it has one (GPU, mount, disk, drive or interface).
   - ✕ on a chip removes it directly.
   - There is no drag and drop.
-- **Adding:** **+** at the end of a row opens a picker list grouped under CPU, Memory, GPU, Disk and
-  Network.
-  - Each entry shows its icon, name and current value.
-  - Parameterised items list one entry per target, e.g. "GPU usage · RTX 4060", "GPU usage · Radeon 680M"
-    and "GPU usage · Auto".
-  - Picking an entry appends it to that row.
+- **Adding:** **+** at the right of a row's caption opens a picker list grouped under CPU, Memory, GPU,
+  Disk and Network. It sits by the caption, not after the chips, so the chips never move under it.
+  - Each kind of item is listed once, with its icon, name and the current value of its usual target:
+    Auto for a GPU, `/` (else the first mount) for disk usage, all disks or interfaces for a rate, the
+    first drive for an NVMe temperature.
+  - Picking an entry appends it to that row and selects it, so its target can be changed at once.
   - **+** is disabled when the row has 4 items.
+- **One line:** with the one-line layout the page shows one ITEMS list, the line as the panel shows it,
+  instead of the two rows.
+  - **Move left** and **Move right** move along the line, across the rows' boundary; there is no **Move to
+    the other row**. **+** appends to the line's end while the two rows have room between them (8 items).
+  - After a move, removal or addition on one line, the line is folded back into two rows of about the same
+    length, the first half on top. So switching back to Stacked shows the line folded in two, in reading
+    order. Selecting or retargeting changes no row, so rows left alone on one line keep their own split.
 - **Saving:** changes save immediately to cosmic-config and apply live, as the other settings do.
 - **Back:** returns to the settings page.
 

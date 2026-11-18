@@ -62,7 +62,6 @@ pub enum Page {
 /// scrolls beyond `max_height`; the settings page shows `settings` with the segmented controls
 /// of `models`.
 pub fn view<'a>(
-    applet: &cosmic::applet::Context,
     stats: Option<&'a Stats>,
     settings: &PanelSettings,
     models: &'a SettingsModels,
@@ -86,7 +85,7 @@ pub fn view<'a>(
         }
         // Padded inside, around its scrollable area.
         Page::Settings => settings::view(models, settings, columns, max_height),
-        Page::Builder => builder::view(applet, stats, settings, models, columns, max_height),
+        Page::Builder => builder::view(stats, settings, models, columns, max_height),
     };
     widget::container(content)
         .padding([spacing.space_s, 0])

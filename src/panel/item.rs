@@ -2,7 +2,7 @@
 
 //! The panel button's **items** and **rows** (`docs/panel-builder.md`): an [`Item`] is one value
 //! with its icon, such as CPU usage or one GPU's temperature; [`Rows`] are the two rows of at
-//! most [`MAX_ITEMS`] items each. An item names its target by something stable that needs no
+//! most [`MAX_ITEMS`] items each, which the one-line layout shows as one [line](Rows::line). An item names its target by something stable that needs no
 //! query to resolve (a PCI address, a mount point, a disk's model and name, an interface name),
 //! and finds it in each sample's [`Stats`]; a target that isn't there shows as missing.
 
@@ -382,6 +382,51 @@ impl Rows {
         Some(Slot { index: to, ..slot })
     }
 
+    /// Every item as one line, as the one-line layout shows them: the top row, then the bottom.
+    #[must_use]
+    pub fn line(&self) -> Vec<Item> {
+        self.items().cloned().collect()
+    }
+
+    /// Where the item at `slot` is on the [line](Self::line).
+    #[must_use]
+    pub fn line_index(&self, slot: Slot) -> usize {
+        match slot.row {
+            Row::Top => slot.index,
+            Row::Bottom => self.top.len() + slot.index,
+        }
+    }
+
+    /// The slot of the item `index` on the [line](Self::line).
+    #[must_use]
+    pub fn line_slot(&self, index: usize) -> Slot {
+        match index.checked_sub(self.top.len()) {
+            None => Slot {
+                row: Row::Top,
+                index,
+            },
+            Some(index) => Slot {
+                row: Row::Bottom,
+                index,
+            },
+        }
+    }
+
+    /// Whether the line has room for another item: both rows together.
+    #[must_use]
+    pub fn line_has_room(&self) -> bool {
+        self.top.len() + self.bottom.len() < 2 * MAX_ITEMS
+    }
+
+    /// The rows of `line` folded in two, in order: the first half on top (the larger half, for
+    /// an odd count), the rest below. Items beyond both rows are dropped.
+    #[must_use]
+    pub fn fold(mut line: Vec<Item>) -> Self {
+        line.truncate(2 * MAX_ITEMS);
+        let bottom = line.split_off(line.len().div_ceil(2));
+        Self::new(line, bottom)
+    }
+
     /// Moves the item at `slot` to the end of the other row, if that has room. Returns where it
     /// went.
     pub fn move_to_other_row(&mut self, slot: Slot) -> Option<Slot> {
@@ -499,52 +544,43 @@ impl Item {
     }
 }
 
-/// Every item the picker offers for `stats`, one per target, in the picker's order: by
-/// [`Group`], then by kind, then by target. A GPU's items are offered only with a GPU, and an
-/// `NVMe` drive's only with a drive.
+/// Every kind of item the picker offers for `stats`, once each, in the picker's order: by
+/// [`Group`], then by kind. Each takes its usual target, changed once added: Auto for a GPU,
+/// `/` (or the first mount) for disk usage, all disks or interfaces for a rate, the first
+/// drive for an `NVMe` temperature. A GPU's items are offered only with a GPU, disk usage only
+/// with a mount and an `NVMe` temperature only with a drive.
 #[must_use]
 pub fn choices(stats: &Stats) -> Vec<Item> {
-    let kinds = [
-        Item::Cpu,
-        Item::CpuTemp,
-        Item::Ram,
-        Item::Swap,
-        Item::GpuUsage(GpuRef::Auto),
-        Item::GpuTemp(GpuRef::Auto),
-        Item::Vram(GpuRef::Auto),
-        Item::root_usage(),
-        Item::DiskRead(DiskRef::All),
-        Item::DiskWrite(DiskRef::All),
-        Item::Download(NetRef::All),
-        Item::Upload(NetRef::All),
-    ];
-    let mut items = Vec::new();
-    for kind in kinds {
-        if kind.gpu().is_some() && stats.gpus.is_empty() {
-            continue;
-        }
-        if matches!(kind, Item::DiskUsage(_)) {
-            // Only the mounts there are; `/` first, as the stats list it.
-            items.extend(
-                stats
-                    .mounts
-                    .iter()
-                    .map(|m| Item::DiskUsage(m.mount_point.clone())),
-            );
-            continue;
-        }
-        items.extend(kind.targets(stats));
-        if matches!(kind, Item::DiskWrite(_)) {
-            items.extend(
-                stats
-                    .disks
-                    .iter()
-                    .filter(|d| d.temp.is_some())
-                    .map(|d| Item::NvmeTemp(DiskId::of(d))),
-            );
-        }
-    }
-    items
+    let gpu = !stats.gpus.is_empty();
+    let mount = stats
+        .mounts
+        .iter()
+        .find(|m| m.mount_point == "/")
+        .or_else(|| stats.mounts.first())
+        .map(|m| Item::DiskUsage(m.mount_point.clone()));
+    let drive = stats
+        .disks
+        .iter()
+        .find(|d| d.temp.is_some())
+        .map(|d| Item::NvmeTemp(DiskId::of(d)));
+    [
+        Some(Item::Cpu),
+        Some(Item::CpuTemp),
+        Some(Item::Ram),
+        Some(Item::Swap),
+        gpu.then_some(Item::GpuUsage(GpuRef::Auto)),
+        gpu.then_some(Item::GpuTemp(GpuRef::Auto)),
+        gpu.then_some(Item::Vram(GpuRef::Auto)),
+        mount,
+        Some(Item::DiskRead(DiskRef::All)),
+        Some(Item::DiskWrite(DiskRef::All)),
+        drive,
+        Some(Item::Download(NetRef::All)),
+        Some(Item::Upload(NetRef::All)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 #[cfg(test)]
@@ -816,18 +852,11 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_offers_one_entry_per_target_in_group_order() {
+    fn the_picker_offers_each_kind_once_with_its_usual_target() {
         let samsung = DiskId {
             model: "Samsung SSD".into(),
             name: "nvme0n1".into(),
         };
-        let wd = DiskId {
-            model: "WD Blue".into(),
-            name: "sda".into(),
-        };
-        let pci = |p: &str| GpuRef::Pci(p.into());
-        let wifi = || NetRef::Interface("wlp4s0".into());
-        let wired = || NetRef::Interface("enp5s0".into());
         assert_eq!(
             choices(&stats()),
             [
@@ -836,32 +865,67 @@ mod tests {
                 Item::Ram,
                 Item::Swap,
                 Item::GpuUsage(GpuRef::Auto),
-                Item::GpuUsage(pci(NVIDIA)),
-                Item::GpuUsage(pci(AMD)),
                 Item::GpuTemp(GpuRef::Auto),
-                Item::GpuTemp(pci(NVIDIA)),
-                Item::GpuTemp(pci(AMD)),
                 Item::Vram(GpuRef::Auto),
-                Item::Vram(pci(NVIDIA)),
-                Item::Vram(pci(AMD)),
+                // No `/` among the mounts: the first.
                 Item::DiskUsage("/mnt/storage".into()),
                 Item::DiskRead(DiskRef::All),
-                Item::DiskRead(DiskRef::Disk(samsung.clone())),
-                Item::DiskRead(DiskRef::Disk(wd.clone())),
                 Item::DiskWrite(DiskRef::All),
-                Item::DiskWrite(DiskRef::Disk(samsung.clone())),
-                Item::DiskWrite(DiskRef::Disk(wd)),
                 Item::NvmeTemp(samsung),
                 Item::Download(NetRef::All),
-                Item::Download(wifi()),
-                Item::Download(wired()),
                 Item::Upload(NetRef::All),
-                Item::Upload(wifi()),
-                Item::Upload(wired()),
             ]
         );
         let groups: Vec<Group> = choices(&stats()).iter().map(Item::group).collect();
         assert!(groups.is_sorted_by_key(|g| Group::ALL.iter().position(|a| a == g)));
+    }
+
+    #[test]
+    fn the_picker_offers_root_usage_first_and_no_drive_without_one() {
+        let mut stats = stats();
+        stats.mounts.push(sysmon_proto::Mount {
+            mount_point: "/".into(),
+            ..stats.mounts[0].clone()
+        });
+        stats.disks.retain(|d| d.temp.is_none());
+        let choices = choices(&stats);
+        assert!(choices.contains(&Item::root_usage()));
+        assert!(!choices.iter().any(|i| matches!(i, Item::NvmeTemp(_))));
+        stats.mounts.clear();
+        assert!(
+            !super::choices(&stats)
+                .iter()
+                .any(|i| matches!(i, Item::DiskUsage(_)))
+        );
+    }
+
+    #[test]
+    fn the_line_is_both_rows_and_folds_back_in_two() {
+        let rows = Rows::new(vec![Item::Cpu, Item::CpuTemp, Item::Ram], vec![Item::Swap]);
+        assert_eq!(
+            rows.line(),
+            [Item::Cpu, Item::CpuTemp, Item::Ram, Item::Swap]
+        );
+        let bottom = |index| Slot {
+            row: Row::Bottom,
+            index,
+        };
+        assert_eq!(rows.line_index(bottom(0)), 3);
+        assert_eq!(rows.line_slot(3), bottom(0));
+        assert_eq!(rows.line_slot(2), top(2));
+        assert_eq!(
+            Rows::fold(rows.line()),
+            Rows::new(vec![Item::Cpu, Item::CpuTemp], vec![Item::Ram, Item::Swap])
+        );
+        // The larger half on top; never more than both rows hold.
+        let fold = Rows::fold(vec![Item::Cpu; 3]);
+        assert_eq!(
+            (fold.row(Row::Top).len(), fold.row(Row::Bottom).len()),
+            (2, 1)
+        );
+        let fold = Rows::fold(vec![Item::Cpu; 9]);
+        assert_eq!(fold.line().len(), 2 * MAX_ITEMS);
+        assert!(!fold.line_has_room());
     }
 
     #[test]

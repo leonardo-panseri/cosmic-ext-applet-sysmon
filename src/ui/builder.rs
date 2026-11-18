@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The panel button's builder (`docs/panel-builder.md`), a sub-page of the settings page: a live
-//! preview of the panel button, its layout, and its two rows as chips. Selecting a chip offers
-//! to move it, move it to the other row or remove it, and to choose its GPU, mount, disk, drive
-//! or interface; **+** opens a picker of every item there is, grouped. Every change saves at once,
-//! as the settings page's do.
+//! The panel button's builder (`docs/panel-builder.md`), a sub-page of the settings page: the
+//! panel button's layout, and its two rows as chips, or with the one-line layout its one line.
+//! Selecting a chip offers to move it, move it to the other row or remove it, and to choose its
+//! GPU, mount, disk, drive or interface; **+** opens a picker of each kind of item, grouped, and
+//! selects the item it adds. Every change saves at once, as the settings page's do, and shows on
+//! the panel itself.
 
-use cosmic::applet::Context;
 use cosmic::iced::advanced::text::Wrapping;
 use cosmic::iced::{Alignment, Color, Length};
 use cosmic::prelude::*;
@@ -18,12 +18,11 @@ use super::settings::{SettingChange, SettingsModels};
 use crate::app::Message;
 use crate::fl;
 use crate::panel::{
-    DiskId, DiskRef, GpuRef, Group, Item, NetRef, PanelSettings, PanelSummary, Row, Rows, Slot,
-    choices, find_disk,
+    DiskId, DiskRef, GpuRef, Group, Item, Layout, NetRef, PanelSettings, Row, Rows, Slot, choices,
+    find_disk,
 };
 use crate::sampler::stats::{GpuSample, Stats};
 use crate::ui::icons::{self, Glyph};
-use crate::ui::panel_button::panel_button;
 
 /// A change made on the builder.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +37,7 @@ pub enum BuilderChange {
     ToOtherRow(Slot),
     /// Another GPU, mount, disk, drive or interface for the item at the slot.
     Retarget(Slot, Item),
-    /// **+** at the end of a row.
+    /// **+** beside a row's caption; on one line, beside the line's.
     OpenPicker(Row),
     ClosePicker,
     /// An entry of the picker, for the row it was opened for.
@@ -66,8 +65,17 @@ impl Builder {
         self.adding
     }
 
-    /// Makes `change` to `rows`, keeping the selection on the item it was on.
-    pub fn change(&mut self, change: BuilderChange, rows: &mut Rows) {
+    /// Makes `change` to `rows`, keeping the selection on the item it was on. An added item is
+    /// selected, so its target can be chosen at once.
+    ///
+    /// With the [one-line](Layout::OneLine) layout the builder shows the rows as one line, so
+    /// moves, removals and additions work on the line, and the line is then folded back into two
+    /// rows of about the same length ([`Rows::fold`]): what stacking it again shows. Rows left
+    /// alone on one line keep their own split.
+    pub fn change(&mut self, change: BuilderChange, layout: Layout, rows: &mut Rows) {
+        if layout == Layout::OneLine && self.change_line(&change, rows) {
+            return;
+        }
         match change {
             BuilderChange::Select(slot) => {
                 self.adding = None;
@@ -109,10 +117,68 @@ impl Builder {
             }
             BuilderChange::ClosePicker => self.adding = None,
             BuilderChange::Add(row, item) => {
-                rows.push(row, item);
                 self.adding = None;
+                if let Some(slot) = rows.push(row, item) {
+                    self.selected = Some(slot);
+                }
             }
         }
+    }
+
+    /// `change` made on the rows as one line, if it is one that works on the line; `false`
+    /// leaves it to [`Self::change`].
+    fn change_line(&mut self, change: &BuilderChange, rows: &mut Rows) -> bool {
+        let mut line = rows.line();
+        let selected = self.selected.map(|s| rows.line_index(s));
+        let selected = match *change {
+            BuilderChange::Remove(slot) => {
+                let at = rows.line_index(slot);
+                if at >= line.len() {
+                    return true;
+                }
+                line.remove(at);
+                match selected {
+                    Some(s) if s == at => None,
+                    Some(s) if s > at => Some(s - 1),
+                    other => other,
+                }
+            }
+            BuilderChange::Shift(slot, right) => {
+                let at = rows.line_index(slot);
+                let to = if right {
+                    at + 1
+                } else {
+                    match at.checked_sub(1) {
+                        Some(to) => to,
+                        None => return true,
+                    }
+                };
+                if to >= line.len() {
+                    return true;
+                }
+                line.swap(at, to);
+                Some(to)
+            }
+            BuilderChange::OpenPicker(row) => {
+                if rows.line_has_room() {
+                    self.selected = None;
+                    self.adding = Some(row);
+                }
+                return true;
+            }
+            BuilderChange::Add(_, ref item) => {
+                self.adding = None;
+                if !rows.line_has_room() {
+                    return true;
+                }
+                line.push(item.clone());
+                Some(line.len() - 1)
+            }
+            _ => return false,
+        };
+        *rows = Rows::fold(line);
+        self.selected = selected.map(|s| rows.line_slot(s));
+        true
     }
 
     /// Back to nothing selected and no picker, as when the page opens.
@@ -121,10 +187,10 @@ impl Builder {
     }
 }
 
-/// The builder page: the preview, the layout and the rows, then what the selection or the
-/// picker offers; in two columns, those beside the rest. Scrolls beyond `max_height`.
+/// The builder page: the layout and the rows, then what the selection or the picker offers; in
+/// two columns, those beside the rest. The panel itself shows every change, so there is no
+/// preview. Scrolls beyond `max_height`.
 pub fn view<'a>(
-    applet: &Context,
     stats: Option<&'a Stats>,
     settings: &PanelSettings,
     models: &'a SettingsModels,
@@ -133,9 +199,8 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     let spacing = cosmic::theme::spacing();
     let fallback = Stats::default();
-    let stats_or_default = stats.unwrap_or(&fallback);
+    let stats = stats.unwrap_or(&fallback);
     let builder = models.builder();
-    let summary = stats.map(|stats| PanelSummary::new(stats, settings));
     let layout_choice = popup::section(
         fl!("setting-layout"),
         vec![
@@ -146,28 +211,19 @@ pub fn view<'a>(
                 .into(),
         ],
     );
-    let main = vec![
-        preview(panel_button(applet, settings, summary.as_ref())),
-        layout_choice,
-        row_chips(
-            fl!("setting-top-row"),
-            Row::Top,
-            settings,
-            stats_or_default,
-            builder,
-        ),
-        row_chips(
-            fl!("setting-bottom-row"),
-            Row::Bottom,
-            settings,
-            stats_or_default,
-            builder,
-        ),
-    ];
+    let mut main = vec![layout_choice];
+    match settings.layout {
+        Layout::Stacked => {
+            for row in [Row::Top, Row::Bottom] {
+                main.push(chips(Some(row), settings, stats, builder));
+            }
+        }
+        Layout::OneLine => main.push(chips(None, settings, stats, builder)),
+    }
     let detail = match (builder.adding(), builder.selected()) {
-        (Some(row), _) => picker(row, stats_or_default),
+        (Some(row), _) => picker(row, settings.layout, stats),
         (None, Some(slot)) => match settings.rows.get(slot) {
-            Some(item) => selection(slot, item, &settings.rows, stats_or_default),
+            Some(item) => selection(slot, item, settings, stats),
             None => hint(),
         },
         (None, None) => hint(),
@@ -204,71 +260,71 @@ pub fn view<'a>(
         .into()
 }
 
-/// The panel button as the panel shows it, on a strip of the panel's colour. Pressing it does
-/// nothing.
-fn preview(button: widget::Button<'_, Message>) -> Element<'_, Message> {
-    let spacing = cosmic::theme::spacing();
-    widget::container(button.on_press(Message::ShowPage(Page::Builder)))
-        .center_x(Length::Fill)
-        .padding([spacing.space_xxs, spacing.space_s])
-        .class(cosmic::theme::Container::custom(|theme| {
-            let cosmic = theme.cosmic();
-            widget::container::Style {
-                text_color: Some(cosmic.background(theme.transparent).on.into()),
-                icon_color: Some(cosmic.background(theme.transparent).on.into()),
-                background: Some(Color::from(cosmic.background(theme.transparent).base).into()),
-                border: cosmic::iced::Border {
-                    radius: cosmic.corner_radii.radius_s.into(),
-                    ..Default::default()
-                },
-                ..widget::container::Style::default()
-            }
-        }))
-        .into()
-}
-
-/// A row's caption over its chips and **+**, wrapping.
-fn row_chips<'a>(
-    title: String,
-    row: Row,
+/// A row's chips under its caption, or with `None` every item's, as one line; **+** at the
+/// caption's end, so adding never moves the chips.
+fn chips<'a>(
+    row: Option<Row>,
     settings: &PanelSettings,
     stats: &Stats,
     builder: &Builder,
 ) -> Element<'a, Message> {
-    let mut chips: Vec<Element<'a, Message>> = settings
-        .rows
-        .row(row)
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            let slot = Slot { row, index };
-            chip(slot, item, stats, builder.selected() == Some(slot))
+    let rows = &settings.rows;
+    let (title, slots, room, picker_row): (String, Vec<Slot>, bool, Row) = match row {
+        Some(row) => (
+            match row {
+                Row::Top => fl!("setting-top-row"),
+                Row::Bottom => fl!("setting-bottom-row"),
+            },
+            (0..rows.row(row).len())
+                .map(|index| Slot { row, index })
+                .collect(),
+            rows.has_room(row),
+            row,
+        ),
+        // The line adds to its end, the bottom row.
+        None => (
+            fl!("setting-items"),
+            (0..rows.line().len()).map(|i| rows.line_slot(i)).collect(),
+            rows.line_has_room(),
+            Row::Bottom,
+        ),
+    };
+    let chips: Vec<Element<'a, Message>> = slots
+        .into_iter()
+        .filter_map(|slot| {
+            let item = rows.get(slot)?;
+            Some(chip(slot, item, stats, builder.selected() == Some(slot)))
         })
         .collect();
-    let add = widget::button::icon(icon::from_name("list-add-symbolic"))
-        .on_press_maybe(settings.rows.has_room(row).then_some(Message::Setting(
-            SettingChange::Builder(BuilderChange::OpenPicker(row)),
-        )))
-        .selected(builder.adding() == Some(row));
-    chips.push(
-        widget::tooltip(
-            add,
-            widget::text::body(fl!("builder-add")),
-            widget::tooltip::Position::Top,
-        )
-        .into(),
+    let add = widget::tooltip(
+        widget::button::icon(icon::from_name("list-add-symbolic"))
+            .extra_small()
+            .on_press_maybe(room.then_some(Message::Setting(SettingChange::Builder(
+                BuilderChange::OpenPicker(picker_row),
+            ))))
+            .selected(builder.adding() == Some(picker_row)),
+        widget::text::body(fl!("builder-add")),
+        widget::tooltip::Position::Top,
     );
     let spacing = cosmic::theme::spacing();
-    popup::section(
-        title,
-        vec![
-            widget::flex_row(chips)
-                .row_spacing(spacing.space_xxs)
-                .column_spacing(spacing.space_xxs)
-                .align_items(Alignment::Center)
-                .into(),
-        ],
-    )
+    let head = widget::Row::new()
+        .align_y(Alignment::Center)
+        .push(popup::muted(widget::text::caption_heading(title)).width(Length::Fill))
+        .push(add);
+    let body: Element<'a, Message> = if chips.is_empty() {
+        popup::muted(widget::text::body(fl!("builder-empty-row"))).into()
+    } else {
+        widget::flex_row(chips)
+            .row_spacing(spacing.space_xxs)
+            .column_spacing(spacing.space_xxs)
+            .align_items(Alignment::Center)
+            .into()
+    };
+    widget::Column::new()
+        .spacing(spacing.space_xxxs)
+        .push(head)
+        .push(body)
+        .into()
 }
 
 /// One item as a chip: its glyph, short name and live value, which selects it when clicked, and
@@ -351,44 +407,56 @@ fn hint<'a>() -> Element<'a, Message> {
     popup::muted(widget::text::body(fl!("builder-hint"))).into()
 }
 
-/// The selected item: its name, the moves and **Remove**, then its targets to choose from.
-fn selection<'a>(slot: Slot, item: &Item, rows: &Rows, stats: &Stats) -> Element<'a, Message> {
+/// The selected item: its name, the moves and **Remove**, then its targets to choose from. On
+/// one line it moves along the line, and has no other row to go to.
+fn selection<'a>(
+    slot: Slot,
+    item: &Item,
+    settings: &PanelSettings,
+    stats: &Stats,
+) -> Element<'a, Message> {
     let spacing = cosmic::theme::spacing();
+    let rows = &settings.rows;
     let change = |change: BuilderChange| Message::Setting(SettingChange::Builder(change));
-    let len = rows.row(slot.row).len();
+    let (at, len) = match settings.layout {
+        Layout::Stacked => (slot.index, rows.row(slot.row).len()),
+        Layout::OneLine => (rows.line_index(slot), rows.line().len()),
+    };
     let action = |icon_name: &'static str, label: String, message: Option<Message>| {
         widget::button::standard(label)
             .leading_icon(icon::from_name(icon_name))
             .on_press_maybe(message)
             .into()
     };
-    let (other_icon, other_label) = match slot.row {
-        Row::Top => ("go-down-symbolic", fl!("builder-to-bottom-row")),
-        Row::Bottom => ("go-up-symbolic", fl!("builder-to-top-row")),
-    };
-    let actions: Vec<Element<'a, Message>> = vec![
+    let mut actions: Vec<Element<'a, Message>> = vec![
         action(
             "go-previous-symbolic",
             fl!("builder-move-left"),
-            (slot.index > 0).then(|| change(BuilderChange::Shift(slot, false))),
+            (at > 0).then(|| change(BuilderChange::Shift(slot, false))),
         ),
         action(
             "go-next-symbolic",
             fl!("builder-move-right"),
-            (slot.index + 1 < len).then(|| change(BuilderChange::Shift(slot, true))),
+            (at + 1 < len).then(|| change(BuilderChange::Shift(slot, true))),
         ),
-        action(
+    ];
+    if settings.layout == Layout::Stacked {
+        let (other_icon, other_label) = match slot.row {
+            Row::Top => ("go-down-symbolic", fl!("builder-to-bottom-row")),
+            Row::Bottom => ("go-up-symbolic", fl!("builder-to-top-row")),
+        };
+        actions.push(action(
             other_icon,
             other_label,
             rows.has_room(slot.row.other())
                 .then(|| change(BuilderChange::ToOtherRow(slot))),
-        ),
-        action(
-            "edit-delete-symbolic",
-            fl!("builder-remove"),
-            Some(change(BuilderChange::Remove(slot))),
-        ),
-    ];
+        ));
+    }
+    actions.push(action(
+        "edit-delete-symbolic",
+        fl!("builder-remove"),
+        Some(change(BuilderChange::Remove(slot))),
+    ));
     let head = widget::Row::new()
         .spacing(spacing.space_xxs)
         .align_y(Alignment::Center)
@@ -427,14 +495,15 @@ fn selection<'a>(slot: Slot, item: &Item, rows: &Rows, stats: &Stats) -> Element
     column.into()
 }
 
-/// The picker for `row`: every item there is, one entry per target, under the group captions,
-/// each with its live value; and a way to close it.
-fn picker<'a>(row: Row, stats: &Stats) -> Element<'a, Message> {
+/// The picker for `row`, or for the line: each kind of item once, under the group captions,
+/// with the live value of its usual target ([`choices`]); and a way to close it.
+fn picker<'a>(row: Row, layout: Layout, stats: &Stats) -> Element<'a, Message> {
     let spacing = cosmic::theme::spacing();
     let change = |change: BuilderChange| Message::Setting(SettingChange::Builder(change));
-    let title = match row {
-        Row::Top => fl!("builder-add-top"),
-        Row::Bottom => fl!("builder-add-bottom"),
+    let title = match (layout, row) {
+        (Layout::OneLine, _) => fl!("builder-add"),
+        (Layout::Stacked, Row::Top) => fl!("builder-add-top"),
+        (Layout::Stacked, Row::Bottom) => fl!("builder-add-bottom"),
     };
     let head = widget::Row::new()
         .align_y(Alignment::Center)
@@ -455,10 +524,7 @@ fn picker<'a>(row: Row, stats: &Stats) -> Element<'a, Message> {
                     .spacing(spacing.space_xs)
                     .align_y(Alignment::Center)
                     .push(small_glyph(item))
-                    .push(
-                        popup::one_line(widget::text::body(full_name(item, stats)))
-                            .width(Length::Fill),
-                    )
+                    .push(popup::one_line(widget::text::body(kind_name(item))).width(Length::Fill))
                     .push(popup::muted(widget::text::body(value)));
                 widget::button::custom(content)
                     .width(Length::Fill)
@@ -539,7 +605,22 @@ pub fn short_name(item: &Item, stats: &Stats) -> String {
 /// "Disk read · All disks", "CPU temperature".
 #[must_use]
 pub fn full_name(item: &Item, stats: &Stats) -> String {
-    let kind = match item {
+    let kind = kind_name(item);
+    if item.has_target() {
+        fl!(
+            "item-with-target",
+            kind = kind,
+            target = target_name(item, stats)
+        )
+    } else {
+        kind
+    }
+}
+
+/// The name of an item's kind, whatever its target: "GPU usage", "Disk read".
+#[must_use]
+pub fn kind_name(item: &Item) -> String {
+    match item {
         Item::Cpu => fl!("item-cpu"),
         Item::CpuTemp => fl!("item-cpu-temp"),
         Item::Ram => fl!("item-ram"),
@@ -553,15 +634,6 @@ pub fn full_name(item: &Item, stats: &Stats) -> String {
         Item::NvmeTemp(_) => fl!("item-nvme-temp"),
         Item::Download(_) => fl!("item-download"),
         Item::Upload(_) => fl!("item-upload"),
-    };
-    if item.has_target() {
-        fl!(
-            "item-with-target",
-            kind = kind,
-            target = target_name(item, stats)
-        )
-    } else {
-        kind
     }
 }
 
@@ -640,14 +712,14 @@ mod tests {
     fn a_chip_is_selected_and_unselected_by_clicking_it() {
         let mut rows = Rows::default();
         let mut builder = Builder::default();
-        builder.change(BuilderChange::Select(top(1)), &mut rows);
+        builder.change(BuilderChange::Select(top(1)), Layout::Stacked, &mut rows);
         assert_eq!(builder.selected(), Some(top(1)));
-        builder.change(BuilderChange::Select(top(0)), &mut rows);
+        builder.change(BuilderChange::Select(top(0)), Layout::Stacked, &mut rows);
         assert_eq!(builder.selected(), Some(top(0)));
-        builder.change(BuilderChange::Select(top(0)), &mut rows);
+        builder.change(BuilderChange::Select(top(0)), Layout::Stacked, &mut rows);
         assert_eq!(builder.selected(), None);
         // No item there.
-        builder.change(BuilderChange::Select(top(3)), &mut rows);
+        builder.change(BuilderChange::Select(top(3)), Layout::Stacked, &mut rows);
         assert_eq!(builder.selected(), None);
     }
 
@@ -655,15 +727,27 @@ mod tests {
     fn the_selection_follows_its_item_when_it_moves() {
         let mut rows = Rows::default();
         let mut builder = Builder::default();
-        builder.change(BuilderChange::Select(top(0)), &mut rows);
-        builder.change(BuilderChange::Shift(top(0), true), &mut rows);
+        builder.change(BuilderChange::Select(top(0)), Layout::Stacked, &mut rows);
+        builder.change(
+            BuilderChange::Shift(top(0), true),
+            Layout::Stacked,
+            &mut rows,
+        );
         assert_eq!(builder.selected(), Some(top(1)));
         assert_eq!(rows.get(top(1)), Some(&Item::Cpu));
-        builder.change(BuilderChange::ToOtherRow(top(1)), &mut rows);
+        builder.change(
+            BuilderChange::ToOtherRow(top(1)),
+            Layout::Stacked,
+            &mut rows,
+        );
         assert_eq!(builder.selected(), Some(slot(Row::Bottom, 2)));
         assert_eq!(rows.get(slot(Row::Bottom, 2)), Some(&Item::Cpu));
         // At the row's end: stays, still selected.
-        builder.change(BuilderChange::Shift(slot(Row::Bottom, 2), true), &mut rows);
+        builder.change(
+            BuilderChange::Shift(slot(Row::Bottom, 2), true),
+            Layout::Stacked,
+            &mut rows,
+        );
         assert_eq!(builder.selected(), Some(slot(Row::Bottom, 2)));
     }
 
@@ -671,13 +755,17 @@ mod tests {
     fn removing_an_item_keeps_the_selection_on_its_own_item() {
         let mut rows = Rows::new(vec![Item::Cpu, Item::CpuTemp, Item::Ram], vec![Item::Swap]);
         let mut builder = Builder::default();
-        builder.change(BuilderChange::Select(top(2)), &mut rows);
-        builder.change(BuilderChange::Remove(top(0)), &mut rows);
+        builder.change(BuilderChange::Select(top(2)), Layout::Stacked, &mut rows);
+        builder.change(BuilderChange::Remove(top(0)), Layout::Stacked, &mut rows);
         assert_eq!(builder.selected(), Some(top(1)));
         assert_eq!(rows.get(top(1)), Some(&Item::Ram));
-        builder.change(BuilderChange::Remove(slot(Row::Bottom, 0)), &mut rows);
+        builder.change(
+            BuilderChange::Remove(slot(Row::Bottom, 0)),
+            Layout::Stacked,
+            &mut rows,
+        );
         assert_eq!(builder.selected(), Some(top(1)));
-        builder.change(BuilderChange::Remove(top(1)), &mut rows);
+        builder.change(BuilderChange::Remove(top(1)), Layout::Stacked, &mut rows);
         assert_eq!(builder.selected(), None);
         assert_eq!(rows.row(Row::Top), [Item::CpuTemp]);
     }
@@ -686,25 +774,97 @@ mod tests {
     fn the_picker_adds_to_the_end_of_its_row_and_closes() {
         let mut rows = Rows::default();
         let mut builder = Builder::default();
-        builder.change(BuilderChange::Select(top(0)), &mut rows);
-        builder.change(BuilderChange::OpenPicker(Row::Bottom), &mut rows);
+        builder.change(BuilderChange::Select(top(0)), Layout::Stacked, &mut rows);
+        builder.change(
+            BuilderChange::OpenPicker(Row::Bottom),
+            Layout::Stacked,
+            &mut rows,
+        );
         assert_eq!(
             (builder.adding(), builder.selected()),
             (Some(Row::Bottom), None)
         );
         let gpu = Item::GpuTemp(GpuRef::Pci("0000:01:00.0".into()));
-        builder.change(BuilderChange::Add(Row::Bottom, gpu.clone()), &mut rows);
+        builder.change(
+            BuilderChange::Add(Row::Bottom, gpu.clone()),
+            Layout::Stacked,
+            &mut rows,
+        );
         assert_eq!(builder.adding(), None);
         assert_eq!(rows.get(slot(Row::Bottom, 2)), Some(&gpu));
+        // Selected, so its GPU can be chosen at once.
+        assert_eq!(builder.selected(), Some(slot(Row::Bottom, 2)));
+    }
+
+    #[test]
+    fn on_one_line_items_move_across_the_rows_and_the_line_folds_in_two() {
+        let mut rows = Rows::new(vec![Item::Cpu, Item::CpuTemp, Item::Ram], vec![Item::Swap]);
+        let mut builder = Builder::default();
+        let line = Layout::OneLine;
+        // Selecting changes nothing: the rows keep their own split.
+        builder.change(BuilderChange::Select(top(2)), line, &mut rows);
+        assert_eq!(rows.row(Row::Top).len(), 3);
+        // RAM moves right, past the end of the top row: the line folds two over two.
+        builder.change(BuilderChange::Shift(top(2), true), line, &mut rows);
+        assert_eq!(
+            rows,
+            Rows::new(vec![Item::Cpu, Item::CpuTemp], vec![Item::Swap, Item::Ram])
+        );
+        assert_eq!(builder.selected(), Some(slot(Row::Bottom, 1)));
+        // At the line's end: stays.
+        builder.change(
+            BuilderChange::Shift(slot(Row::Bottom, 1), true),
+            line,
+            &mut rows,
+        );
+        assert_eq!(builder.selected(), Some(slot(Row::Bottom, 1)));
+        // Removing the first item keeps the selection on RAM.
+        builder.change(BuilderChange::Remove(top(0)), line, &mut rows);
+        assert_eq!(
+            rows,
+            Rows::new(vec![Item::CpuTemp, Item::Swap], vec![Item::Ram])
+        );
+        assert_eq!(rows.get(builder.selected().unwrap()), Some(&Item::Ram));
+    }
+
+    #[test]
+    fn on_one_line_the_picker_adds_to_the_line_s_end_while_both_rows_have_room() {
+        let mut rows = Rows::new(vec![Item::Cpu; 4], vec![Item::Ram; 3]);
+        let mut builder = Builder::default();
+        let line = Layout::OneLine;
+        // The top row is full, but the line isn't.
+        builder.change(BuilderChange::OpenPicker(Row::Bottom), line, &mut rows);
+        assert_eq!(builder.adding(), Some(Row::Bottom));
+        builder.change(BuilderChange::Add(Row::Bottom, Item::Swap), line, &mut rows);
+        assert_eq!(rows.line().last(), Some(&Item::Swap));
+        assert_eq!(rows.get(builder.selected().unwrap()), Some(&Item::Swap));
+        // Full now.
+        builder.change(BuilderChange::OpenPicker(Row::Bottom), line, &mut rows);
+        assert_eq!(builder.adding(), None);
+        builder.change(
+            BuilderChange::Add(Row::Bottom, Item::CpuTemp),
+            line,
+            &mut rows,
+        );
+        assert_eq!(rows.line().len(), 8);
+        assert!(!rows.line().contains(&Item::CpuTemp));
     }
 
     #[test]
     fn a_full_row_opens_no_picker() {
         let mut rows = Rows::new(vec![Item::Cpu; 4], vec![]);
         let mut builder = Builder::default();
-        builder.change(BuilderChange::OpenPicker(Row::Top), &mut rows);
+        builder.change(
+            BuilderChange::OpenPicker(Row::Top),
+            Layout::Stacked,
+            &mut rows,
+        );
         assert_eq!(builder.adding(), None);
-        builder.change(BuilderChange::Add(Row::Top, Item::Ram), &mut rows);
+        builder.change(
+            BuilderChange::Add(Row::Top, Item::Ram),
+            Layout::Stacked,
+            &mut rows,
+        );
         assert_eq!(rows.row(Row::Top), vec![Item::Cpu; 4]);
     }
 
@@ -712,12 +872,20 @@ mod tests {
     fn a_new_target_replaces_the_item_in_place_only_for_the_same_kind() {
         let mut rows = Rows::new(vec![Item::GpuUsage(GpuRef::Auto)], vec![]);
         let mut builder = Builder::default();
-        builder.change(BuilderChange::Select(top(0)), &mut rows);
+        builder.change(BuilderChange::Select(top(0)), Layout::Stacked, &mut rows);
         let nvidia = Item::GpuUsage(GpuRef::Pci("0000:01:00.0".into()));
-        builder.change(BuilderChange::Retarget(top(0), nvidia.clone()), &mut rows);
+        builder.change(
+            BuilderChange::Retarget(top(0), nvidia.clone()),
+            Layout::Stacked,
+            &mut rows,
+        );
         assert_eq!(rows.get(top(0)), Some(&nvidia));
         assert_eq!(builder.selected(), Some(top(0)));
-        builder.change(BuilderChange::Retarget(top(0), Item::Ram), &mut rows);
+        builder.change(
+            BuilderChange::Retarget(top(0), Item::Ram),
+            Layout::Stacked,
+            &mut rows,
+        );
         assert_eq!(rows.get(top(0)), Some(&nvidia));
     }
 

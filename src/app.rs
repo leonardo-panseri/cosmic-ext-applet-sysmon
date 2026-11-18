@@ -250,7 +250,6 @@ impl cosmic::Application for AppModel {
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
         redraws::count(redraws::Event::ViewWindow);
         let content = popup::view(
-            &self.core.applet,
             self.stats.as_deref(),
             &self.settings,
             &self.models,

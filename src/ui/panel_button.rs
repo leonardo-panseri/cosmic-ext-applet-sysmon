@@ -6,7 +6,7 @@
 //! are further apart.
 //!
 //! - **Stacked**: the rows one above the other, in columns, so the items of both rows line up.
-//! - **One line**: the top row, then the bottom row.
+//! - **One line**: the top row, then the bottom row, as one row of items.
 //! - On a **vertical panel**, the items go one below the other, each glyph above its value.
 
 use std::borrow::Cow;
@@ -43,8 +43,9 @@ const ICON_GAP: f32 = 0.3;
 /// The gap between one item (an icon and its value) and the next, relative to the font size.
 const ITEM_GAP: f32 = 0.6;
 
-/// The opacity of the line between the rows on one line, relative to the text colour.
-const SEPARATOR_ALPHA: f32 = 0.35;
+/// The gap between items on one line, relative to the font size. Each value's cell already
+/// leaves room after a value shorter than its widest, so this is less than [`ITEM_GAP`].
+const ONE_LINE_ITEM_GAP: f32 = 0.4;
 
 /// Advance width of one monospace glyph, relative to the font size (Noto Sans Mono, COSMIC's
 /// default monospace font, and most others are 0.6 em).
@@ -148,45 +149,23 @@ fn stacked<'a>(top: Vec<Cell>, bottom: Vec<Cell>, size: f32) -> Element<'a, Mess
     items_row(items, size)
 }
 
-/// The top row, then the bottom row, on one line, a thin separator between them.
+/// The top row, then the bottom row, on one line, as one row of items: closer together than
+/// stacked columns, whose values leave room only at their ends.
 fn one_line<'a>(top: Vec<Cell>, bottom: Vec<Cell>, size: f32) -> Element<'a, Message> {
-    let line = |cells: Vec<Cell>| -> Vec<Element<'a, Message>> {
-        cells
-            .into_iter()
-            .map(|cell| {
-                let widest = cell.item.value_kind().widest();
-                item(
-                    glyph(&cell.item, size, cell.warn),
-                    value_cell(cell.value, widest, size, cell.warn),
-                    size,
-                )
-            })
-            .collect()
-    };
-    let both = !top.is_empty() && !bottom.is_empty();
-    let mut items = line(top);
-    if both {
-        items.push(separator(size));
-    }
-    items.extend(line(bottom));
-    items_row(items, size)
-}
-
-/// A thin vertical line, as tall as the text at `size`, in the text colour made faint.
-fn separator<'a>(size: f32) -> Element<'a, Message> {
-    let line = widget::container(widget::Space::new())
-        .width(Length::Fixed(1.0))
-        .height(Length::Fixed(size))
-        .class(cosmic::theme::Container::custom(|theme| {
-            let mut color: Color = theme.cosmic().background(theme.transparent).on.into();
-            color.a *= SEPARATOR_ALPHA;
-            widget::container::Style {
-                background: Some(color.into()),
-                ..widget::container::Style::default()
-            }
-        }));
-    widget::container(line)
-        .center_y(Length::Fixed(size * LINE_HEIGHT))
+    let items: Vec<Element<'a, Message>> = top
+        .into_iter()
+        .chain(bottom)
+        .map(|cell| {
+            let widest = cell.item.value_kind().widest();
+            item(
+                glyph(&cell.item, size, cell.warn),
+                value_cell(cell.value, widest, size, cell.warn),
+                size,
+            )
+        })
+        .collect();
+    widget::Row::with_children(items)
+        .spacing((size * ONE_LINE_ITEM_GAP).round())
         .into()
 }
 

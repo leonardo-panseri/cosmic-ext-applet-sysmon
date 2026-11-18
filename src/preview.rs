@@ -339,7 +339,6 @@ impl cosmic::Application for Preview {
     fn view(&self) -> Element<'_, Message> {
         redraws::count(redraws::Event::ViewWindow);
         let popup = card(popup::view(
-            &self.core.applet,
             Some(&self.stats),
             &self.settings,
             &self.models,

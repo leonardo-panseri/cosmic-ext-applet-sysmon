@@ -133,7 +133,10 @@ impl SettingsModels {
                 settings.popup_layout =
                     value(&self.popup_layout, item).unwrap_or(settings.popup_layout);
             }
-            SettingChange::Builder(change) => self.builder.change(change, &mut settings.rows),
+            SettingChange::Builder(change) => {
+                self.builder
+                    .change(change, settings.layout, &mut settings.rows);
+            }
             SettingChange::WarnOn(kind, on) => match settings.limit_mut(kind) {
                 Some(limit) => limit.on = on,
                 None => settings.warn_nvme.on = on,
