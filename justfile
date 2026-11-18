@@ -96,7 +96,7 @@ flatpak-build *args:
 # Builds the Flatpak from the working tree, then installs it for the current user
 flatpak-install: flatpak-build
     flatpak remote-add --user --if-not-exists --no-gpg-verify {{flatpak-remote}} {{flatpak-repo}}
-    flatpak install --user --reinstall --noninteractive {{flatpak-remote}} {{appid}}
+    flatpak install --user --or-update --noninteractive {{flatpak-remote}} {{appid}}
 
 # Regenerates flatpak/cargo-sources.json from Cargo.lock; run after changing dependencies
 flatpak-sources:
