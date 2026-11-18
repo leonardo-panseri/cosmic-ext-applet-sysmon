@@ -17,6 +17,10 @@
 //!
 //! A **command line** is split into words by the shell's quoting rules (`shlex`) and run without
 //! a shell: directly, or in a Flatpak as `flatpak-spawn --host <words…>`.
+//!
+//! With an **activation token** from the compositor (`xdg-activation`), the monitor gets it as
+//! `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`, as COSMIC's own applets pass it, so it opens
+//! focused and in front.
 
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -99,15 +103,22 @@ fn desktop_id(word: &str) -> Option<&str> {
     (id_chars && first_ok && (suffixed || reverse_dns)).then_some(id)
 }
 
-/// Opens the process monitor that `setting` names without waiting for it. The launch runs on its
-/// own thread, which only waits for the launcher (or the command) to exit, so the UI never
-/// blocks.
-pub fn process_monitor(setting: &str) {
+/// The environment variables an activation token goes in.
+const TOKEN_VARIABLES: [&str; 2] = ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"];
+
+/// Opens the process monitor that `setting` names without waiting for it, passing it `token` if
+/// there is one. The launch runs on its own thread, which only waits for the launcher (or the
+/// command) to exit, so the UI never blocks.
+pub fn process_monitor(setting: &str, token: Option<&str>) {
     let Some(launcher) = Launcher::parse(setting) else {
         eprintln!("can't open the process monitor: {setting:?} is no desktop id or command");
         return;
     };
-    let mut command = command(&launcher, std::path::Path::new("/.flatpak-info").exists());
+    let mut command = command(
+        &launcher,
+        std::path::Path::new("/.flatpak-info").exists(),
+        token,
+    );
     let spawned = std::thread::Builder::new()
         .name("sysmon-launch".into())
         .spawn(move || match command.spawn() {
@@ -125,8 +136,9 @@ pub fn process_monitor(setting: &str) {
     }
 }
 
-/// The command that opens `launcher`, through `flatpak-spawn --host` when `in_flatpak`.
-fn command(launcher: &Launcher, in_flatpak: bool) -> Command {
+/// The command that opens `launcher` with `token`, through `flatpak-spawn --host` when
+/// `in_flatpak`.
+fn command(launcher: &Launcher, in_flatpak: bool, token: Option<&str>) -> Command {
     let mut argv: Vec<&str> = match launcher {
         Launcher::DesktopId(id) => {
             let fallback = if id == DEFAULT_PROCESS_MONITOR {
@@ -138,11 +150,29 @@ fn command(launcher: &Launcher, in_flatpak: bool) -> Command {
         }
         Launcher::Command(words) => words.iter().map(String::as_str).collect(),
     };
+    // `flatpak-spawn` passes the host process only the variables it is given.
+    let host_env: Vec<String> = match token {
+        Some(token) if in_flatpak => TOKEN_VARIABLES
+            .iter()
+            .map(|name| format!("--env={name}={token}"))
+            .collect(),
+        _ => Vec::new(),
+    };
     if in_flatpak {
         // No `--watch-bus`: the monitor outlives the applet.
-        argv.splice(0..0, ["flatpak-spawn", "--host"]);
+        let prefix = ["flatpak-spawn", "--host"]
+            .into_iter()
+            .chain(host_env.iter().map(String::as_str));
+        argv.splice(0..0, prefix);
     }
     let mut command = Command::new(argv[0]);
+    for name in TOKEN_VARIABLES {
+        match token {
+            Some(token) if !in_flatpak => command.env(name, token),
+            // Never one the applet itself was started with.
+            _ => command.env_remove(name),
+        };
+    }
     command
         .args(&argv[1..])
         // The applet's own runtime setting; the monitor runs outside a Flatpak with our
@@ -238,6 +268,7 @@ mod tests {
         let args = args(&command(
             &Launcher::DesktopId(DEFAULT_PROCESS_MONITOR.into()),
             true,
+            None,
         ));
         assert_eq!(args[..4], ["flatpak-spawn", "--host", "sh", "-c"]);
         assert_eq!(args[4], SCRIPT);
@@ -249,6 +280,7 @@ mod tests {
         let args = args(&command(
             &Launcher::DesktopId("org.gnome.SystemMonitor".into()),
             false,
+            None,
         ));
         assert_eq!(args[..2], ["sh", "-c"]);
         assert_eq!(args[2], SCRIPT);
@@ -260,11 +292,11 @@ mod tests {
     fn a_command_line_runs_its_words_without_a_shell() {
         let launcher = Launcher::parse("kitty -e 'btop --utf-force'").unwrap();
         assert_eq!(
-            args(&command(&launcher, false)),
+            args(&command(&launcher, false, None)),
             ["kitty", "-e", "btop --utf-force"]
         );
         assert_eq!(
-            args(&command(&launcher, true)),
+            args(&command(&launcher, true, None)),
             ["flatpak-spawn", "--host", "kitty", "-e", "btop --utf-force"]
         );
     }
@@ -277,12 +309,43 @@ mod tests {
         ];
         for launcher in &launchers {
             for in_flatpak in [true, false] {
-                let command = command(launcher, in_flatpak);
+                let command = command(launcher, in_flatpak, None);
                 let removed = command
                     .get_envs()
                     .any(|(name, value)| name == crate::TOKIO_WORKER_THREADS && value.is_none());
                 assert!(removed, "{launcher:?}, in_flatpak: {in_flatpak}");
             }
+        }
+    }
+
+    #[test]
+    fn an_activation_token_reaches_the_monitor() {
+        let launcher = Launcher::parse("missioncenter").unwrap();
+        assert_eq!(
+            args(&command(&launcher, true, Some("tok-1"))),
+            [
+                "flatpak-spawn",
+                "--host",
+                "--env=XDG_ACTIVATION_TOKEN=tok-1",
+                "--env=DESKTOP_STARTUP_ID=tok-1",
+                "missioncenter",
+            ]
+        );
+        let env = |command: &Command, name: &str| {
+            command
+                .get_envs()
+                .find(|(n, _)| *n == name)
+                .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+        };
+        let direct = command(&launcher, false, Some("tok-1"));
+        assert_eq!(args(&direct), ["missioncenter"]);
+        for name in TOKEN_VARIABLES {
+            assert_eq!(env(&direct, name), Some(Some("tok-1".into())));
+        }
+        // Without one, never a stale one the applet was started with.
+        let without = command(&launcher, false, None);
+        for name in TOKEN_VARIABLES {
+            assert_eq!(env(&without, name), Some(None));
         }
     }
 
@@ -322,7 +385,7 @@ mod tests {
         );
         let setting = format!("{} 'a b' '$HOME;' \"c\"", monitor.display());
         let launcher = Launcher::parse(&setting).unwrap();
-        let status = command(&launcher, false).status().unwrap();
+        let status = command(&launcher, false, None).status().unwrap();
         assert!(status.success());
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "a b\n$HOME;\nc\n");
     }
@@ -407,7 +470,7 @@ mod tests {
                 )
         };
         assert_eq!(running(), "", "the process monitor is already open");
-        process_monitor(DEFAULT_PROCESS_MONITOR);
+        process_monitor(DEFAULT_PROCESS_MONITOR, None);
         let mut pids = String::new();
         for _ in 0..50 {
             std::thread::sleep(std::time::Duration::from_millis(100));

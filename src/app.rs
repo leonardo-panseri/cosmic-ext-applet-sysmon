@@ -4,6 +4,10 @@
 
 use std::sync::Arc;
 
+use cosmic::applet::token::subscription::{
+    TokenRequest, TokenUpdate, activation_token_subscription,
+};
+use cosmic::cctk::sctk::reexports::calloop;
 use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
 use cosmic::iced::event::{PlatformSpecific, wayland};
 use cosmic::iced::futures::{SinkExt, Stream, StreamExt};
@@ -54,6 +58,9 @@ pub struct AppModel {
     /// The stats page's columns, chosen when the popup opens, the settings or the output change,
     /// or a sample arrives while it is open; never per frame (D6).
     columns: Columns,
+    /// Asks the compositor for activation tokens; `None` until libcosmic's token thread starts,
+    /// or once it stops.
+    token_tx: Option<calloop::channel::Sender<TokenRequest>>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +85,8 @@ pub enum Message {
     Surface(cosmic::surface::Action<Message>),
     /// An output appeared, changed (resolution, scale, rotation) or went away.
     Output(wayland::OutputEvent, WlOutput),
+    /// libcosmic's activation-token thread started or stopped, or a token arrived.
+    Token(TokenUpdate),
 }
 
 impl AppModel {
@@ -196,6 +205,7 @@ impl cosmic::Application for AppModel {
             outputs: Outputs::default(),
             room: None,
             columns: Columns::One,
+            token_tx: None,
         };
         (app, Task::none())
     }
@@ -209,7 +219,12 @@ impl cosmic::Application for AppModel {
             .core
             .watch_config::<PanelSettings>(Self::APP_ID)
             .map(|update| Message::ConfigChanged(update.config));
-        Subscription::batch([Subscription::run(sampler_messages), config, output_events()])
+        Subscription::batch([
+            Subscription::run(sampler_messages),
+            config,
+            output_events(),
+            activation_token_subscription(0).map(Message::Token),
+        ])
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
@@ -297,7 +312,19 @@ impl cosmic::Application for AppModel {
                 ));
             }
             Message::OpenProcessMonitor => {
-                launch::process_monitor(&self.settings.process_monitor);
+                // With a token, so the monitor opens focused, as COSMIC's applets open theirs.
+                // The launch waits for it; without the token thread, it goes at once.
+                let request = TokenRequest {
+                    app_id: Self::APP_ID.to_owned(),
+                    exec: self.settings.process_monitor.clone(),
+                };
+                let sent = self
+                    .token_tx
+                    .as_ref()
+                    .is_some_and(|tx| tx.send(request).is_ok());
+                if !sent {
+                    launch::process_monitor(&self.settings.process_monitor, None);
+                }
                 if let Some(id) = self.popup.take() {
                     return self.close_popup(id);
                 }
@@ -345,6 +372,15 @@ impl cosmic::Application for AppModel {
             }
             Message::Surface(action) => {
                 return cosmic::task::message(cosmic::Action::Surface(action));
+            }
+            Message::Token(TokenUpdate::Init(tx)) => self.token_tx = Some(tx),
+            Message::Token(TokenUpdate::Finished) => self.token_tx = None,
+            // `None` when the compositor offers no activation: launched all the same.
+            Message::Token(TokenUpdate::ActivationToken { token, exec }) => {
+                if crate::probe_client::debug() {
+                    eprintln!("launch: activation token: {}", token.is_some());
+                }
+                launch::process_monitor(&exec, token.as_deref());
             }
             Message::Output(event, output) => {
                 track_output(&mut self.outputs, event, output);
