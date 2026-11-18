@@ -16,3 +16,6 @@ debian/*
 # Flatpak builder state and build output (just flatpak-build)
 .flatpak-builder/
 build-flatpak/
+
+# Agent worktrees
+.claude/worktrees/
