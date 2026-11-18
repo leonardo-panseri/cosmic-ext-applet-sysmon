@@ -43,6 +43,9 @@ const ICON_GAP: f32 = 0.3;
 /// The gap between one item (an icon and its value) and the next, relative to the font size.
 const ITEM_GAP: f32 = 0.6;
 
+/// The opacity of the line between the rows on one line, relative to the text colour.
+const SEPARATOR_ALPHA: f32 = 0.35;
+
 /// Advance width of one monospace glyph, relative to the font size (Noto Sans Mono, COSMIC's
 /// default monospace font, and most others are 0.6 em).
 const MONO_ADVANCE: f32 = 0.6;
@@ -97,7 +100,7 @@ pub fn panel_button<'a>(
         return applet.button_from_element(glyph(&Item::Cpu, f32::from(icon_height), warn), true);
     }
     if !applet.is_horizontal() {
-        return vertical_button(applet, top, bottom);
+        return vertical_button(applet, settings.layout, top, bottom);
     }
     let (_, icon_height) = applet.suggested_size(true);
     let (major_padding, minor_padding) = applet.suggested_padding(true);
@@ -145,7 +148,7 @@ fn stacked<'a>(top: Vec<Cell>, bottom: Vec<Cell>, size: f32) -> Element<'a, Mess
     items_row(items, size)
 }
 
-/// The top row, then the bottom row, on one line.
+/// The top row, then the bottom row, on one line, a thin separator between them.
 fn one_line<'a>(top: Vec<Cell>, bottom: Vec<Cell>, size: f32) -> Element<'a, Message> {
     let line = |cells: Vec<Cell>| -> Vec<Element<'a, Message>> {
         cells
@@ -160,9 +163,31 @@ fn one_line<'a>(top: Vec<Cell>, bottom: Vec<Cell>, size: f32) -> Element<'a, Mes
             })
             .collect()
     };
+    let both = !top.is_empty() && !bottom.is_empty();
     let mut items = line(top);
+    if both {
+        items.push(separator(size));
+    }
     items.extend(line(bottom));
     items_row(items, size)
+}
+
+/// A thin vertical line, as tall as the text at `size`, in the text colour made faint.
+fn separator<'a>(size: f32) -> Element<'a, Message> {
+    let line = widget::container(widget::Space::new())
+        .width(Length::Fixed(1.0))
+        .height(Length::Fixed(size))
+        .class(cosmic::theme::Container::custom(|theme| {
+            let mut color: Color = theme.cosmic().background(false).on.into();
+            color.a *= SEPARATOR_ALPHA;
+            widget::container::Style {
+                background: Some(color.into()),
+                ..widget::container::Style::default()
+            }
+        }));
+    widget::container(line)
+        .center_y(Length::Fixed(size * LINE_HEIGHT))
+        .into()
 }
 
 /// A line of panel text's height with nothing in it, for a missing cell.
@@ -172,29 +197,88 @@ fn blank_line<'a>(size: f32) -> Element<'a, Message> {
         .into()
 }
 
-/// The button of a vertical panel, as wide as an icon button: one column of items, each glyph
-/// above its value, both centred, the value sized so the widest value of any item shown fits the
-/// icon's width and half the padding beside it.
+/// The space between the two columns of a vertical panel, pixels.
+const COLUMN_GAP: f32 = 2.0;
+
+/// The font size from which two columns of a vertical panel count as readable.
+const READABLE_FONT_SIZE: f32 = 9.0;
+
+/// How a vertical panel's items stand.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Vertical {
+    /// The top row in a column on the left, the bottom row on the right; else one column, the
+    /// top row first.
+    two_columns: bool,
+    /// The font size of every value.
+    size: f32,
+}
+
+/// How a vertical panel's items stand in `layout`, when the values may take `room` pixels
+/// across and the widest value of the top row has `top` characters, of the bottom row `bottom`
+/// (0 for an empty row); no font bigger than `max_size`. Stacked takes two columns when both
+/// rows have items and their values fit side by side at [`READABLE_FONT_SIZE`] or more; anything
+/// else is one column, sized so the widest value of either row fits.
+fn vertical(layout: Layout, room: f32, top: usize, bottom: usize, max_size: f32) -> Vertical {
+    #[expect(clippy::cast_precision_loss, reason = "a few characters")]
+    let fitting = |width: f32, chars: usize| (width / (chars.max(1) as f32 * MONO_ADVANCE)).floor();
+    if layout == Layout::Stacked && top > 0 && bottom > 0 {
+        let column = (room - COLUMN_GAP) / 2.0;
+        let size = fitting(column, top.max(bottom));
+        if size >= READABLE_FONT_SIZE {
+            return Vertical {
+                two_columns: true,
+                size: size.min(max_size),
+            };
+        }
+    }
+    Vertical {
+        two_columns: false,
+        size: fitting(room, top.max(bottom)).clamp(MIN_FONT_SIZE, max_size.max(MIN_FONT_SIZE)),
+    }
+}
+
+/// The button of a vertical panel, as wide as an icon button: the items one below the other,
+/// each glyph above its value, both centred, in one column or two ([`vertical`]). The values may
+/// use the icon's width and half the padding beside it.
 fn vertical_button<'a>(
     applet: &Context,
+    layout: Layout,
     top: Vec<Cell>,
     bottom: Vec<Cell>,
 ) -> widget::Button<'a, Message> {
     let (icon_width, _) = applet.suggested_size(true);
-    let (_, minor_padding) = applet.suggested_padding(true);
+    let (major_padding, minor_padding) = applet.suggested_padding(true);
     let room = f32::from(icon_width + minor_padding);
-    let chars = top
-        .iter()
-        .chain(&bottom)
-        .map(|cell| cell.item.value_kind().widest().chars().count())
-        .max()
-        .unwrap_or(1);
-    #[expect(clippy::cast_precision_loss, reason = "a few characters")]
-    let size = (room / (chars as f32 * MONO_ADVANCE))
-        .floor()
-        .max(MIN_FONT_SIZE);
-    let column = vertical_column(top.into_iter().chain(bottom), size);
-    applet.button_from_element(column, true)
+    let widest = |cells: &[Cell]| {
+        cells
+            .iter()
+            .map(|cell| cell.item.value_kind().widest().chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    // As big as the one-line text of a horizontal panel this thick.
+    let max_size = font_size(
+        f32::from(icon_width + 2 * minor_padding),
+        ONE_LINE_FONT_SHARE,
+    );
+    let arrangement = vertical(layout, room, widest(&top), widest(&bottom), max_size);
+    let size = arrangement.size;
+    let content: Element<'a, Message> = if arrangement.two_columns {
+        row![
+            vertical_column(top.into_iter(), size),
+            vertical_column(bottom.into_iter(), size),
+        ]
+        .spacing(COLUMN_GAP)
+        .into()
+    } else {
+        vertical_column(top.into_iter().chain(bottom), size)
+    };
+    // As `applet.button_from_element`, but as long as the items need: the panel's width, and
+    // the major (shrinkable) padding above and below.
+    let width = f32::from(icon_width + 2 * minor_padding);
+    widget::button::custom(widget::layer_container(content).center_x(Length::Fixed(width)))
+        .padding([major_padding, 0])
+        .class(cosmic::theme::Button::AppletIcon)
 }
 
 /// `cells` one below the other, each glyph above its value, both centred.
@@ -415,6 +499,77 @@ fn panel_text<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rows' widest values: "100%" and "999K" are 4 characters, "100°C" 5.
+    const PERCENT: usize = 4;
+    const CELSIUS: usize = 5;
+
+    /// The room on S and L vertical panels: the icon and half the padding beside it.
+    const S: f32 = 20.0 + 10.0;
+    const L: f32 = 32.0 + 16.0;
+
+    fn one(size: f32) -> Vertical {
+        Vertical {
+            two_columns: false,
+            size,
+        }
+    }
+
+    #[test]
+    fn one_line_is_one_column_sized_to_the_widest_value() {
+        assert_eq!(
+            vertical(Layout::OneLine, S, PERCENT, PERCENT, 14.0),
+            one(12.0)
+        );
+        assert_eq!(
+            vertical(Layout::OneLine, S, PERCENT, CELSIUS, 14.0),
+            one(10.0)
+        );
+        // Never above the cap, nor below the smallest size.
+        assert_eq!(vertical(Layout::OneLine, L, PERCENT, 0, 18.0), one(18.0));
+        assert_eq!(
+            vertical(Layout::OneLine, 10.0, CELSIUS, 0, 14.0),
+            one(MIN_FONT_SIZE)
+        );
+    }
+
+    #[test]
+    fn stacked_takes_two_columns_where_both_fit_at_a_readable_size() {
+        assert_eq!(
+            vertical(Layout::Stacked, L, PERCENT, PERCENT, 22.0),
+            Vertical {
+                two_columns: true,
+                size: 9.0
+            }
+        );
+        assert_eq!(
+            vertical(Layout::Stacked, 64.0, PERCENT, PERCENT, 22.0),
+            Vertical {
+                two_columns: true,
+                size: 12.0
+            }
+        );
+    }
+
+    #[test]
+    fn stacked_falls_back_to_one_column_where_two_would_be_too_small() {
+        // S: 14 px a column fits 4 characters at 5 px.
+        assert_eq!(
+            vertical(Layout::Stacked, S, PERCENT, PERCENT, 14.0),
+            one(12.0)
+        );
+        // L, but a temperature needs 5 characters: 7 px.
+        assert_eq!(
+            vertical(Layout::Stacked, L, PERCENT, CELSIUS, 22.0),
+            one(16.0)
+        );
+    }
+
+    #[test]
+    fn stacked_with_an_empty_row_is_one_column() {
+        assert_eq!(vertical(Layout::Stacked, 64.0, PERCENT, 0, 22.0), one(22.0));
+        assert_eq!(vertical(Layout::Stacked, 64.0, 0, PERCENT, 22.0), one(22.0));
+    }
 
     /// `text` without Fluent's bidi isolation marks around arguments.
     fn plain(text: &str) -> String {

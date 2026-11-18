@@ -13,8 +13,11 @@
 //! measured from it as on the panel. `SYSMON_PREVIEW_COLUMNS=1|2|auto` (default `auto`) sets the
 //! popup's layout; outside screenshot mode `auto` measures the real output, from the same output
 //! events as the applet. `SYSMON_PREVIEW_SETTINGS=1` starts on the settings page. `SYSMON_PREVIEW_LAYOUT=stacked|one-line` picks the panel
-//! button's layout, and `COSMIC_PANEL_SIZE` (`XS`…`XL`) and `COSMIC_PANEL_ANCHOR` (`Left` for a
-//! vertical panel) its panel, as libcosmic reads them. The file is `RGBA`, the width and height as
+//! button's layout, `SYSMON_PREVIEW_ROWS=custom` four items over three (with GPU and `NVMe`
+//! items) instead of the default rows, and `COSMIC_PANEL_SIZE` (`XS`…`XL`) and
+//! `COSMIC_PANEL_ANCHOR` (`Left` for a vertical panel) its panel, as libcosmic reads them.
+//! `SYSMON_PREVIEW_PANEL=1` shows only the panel, along the top of the window or down its left
+//! side for a vertical panel, in a small window. The file is `RGBA`, the width and height as
 //! little-endian `u32`s, then the pixels; `tools/screenshots.py` turns it into a PNG.
 //!
 //! `SYSMON_PREVIEW_LIVE=1` instead feeds the preview from the real sampler, as the panel does
@@ -35,7 +38,9 @@ use cosmic::widget;
 
 use crate::app::{self, Message};
 use crate::outputs::Outputs;
-use crate::panel::{Layout, PanelSettings, PanelSummary, PopupLayout};
+use crate::panel::{
+    DiskId, GpuRef, Item, Layout, NetRef, PanelSettings, PanelSummary, PopupLayout, Rows,
+};
 use crate::sampler::history::{HISTORY_LEN, History};
 use crate::sampler::rates::PairRate;
 use crate::sampler::stats::{
@@ -65,7 +70,19 @@ const LIVE_SHOT_DELAY: Duration = Duration::from_secs(5);
 
 pub fn run() -> cosmic::iced::Result {
     let shot = std::env::var("SYSMON_PREVIEW_SCREENSHOT").ok();
-    let settings = if shot.is_some() {
+    let settings = if shot.is_some() && panel_only() {
+        let horizontal = cosmic::applet::Context::default().is_horizontal();
+        let size = if horizontal {
+            PANEL_SHOT
+        } else {
+            Size::new(PANEL_SHOT.height, PANEL_SHOT.width)
+        };
+        cosmic::app::Settings::default()
+            .size(size)
+            .size_limits(Limits::new(size, size))
+            .resizable(None)
+            .theme(cosmic::Theme::dark())
+    } else if shot.is_some() {
         let height = shot_height();
         let columns = columns::choose(
             popup_layout(),
@@ -85,6 +102,40 @@ pub fn run() -> cosmic::iced::Result {
         cosmic::app::Settings::default().size(Size::new(Columns::Two.width() + 40.0, 1000.0))
     };
     cosmic::app::run::<Preview>(settings, shot)
+}
+
+/// The size of a screenshot of the panel alone (`SYSMON_PREVIEW_PANEL`), for a horizontal
+/// panel; turned on its side for a vertical one.
+const PANEL_SHOT: Size = Size::new(560.0, 150.0);
+
+/// Whether only the panel is shown (`SYSMON_PREVIEW_PANEL`).
+fn panel_only() -> bool {
+    std::env::var_os("SYSMON_PREVIEW_PANEL").is_some()
+}
+
+/// The rows from `SYSMON_PREVIEW_ROWS`: `custom` for four items over three, GPU, `NVMe` and
+/// disk items among them; else the default rows.
+fn rows() -> Rows {
+    if std::env::var("SYSMON_PREVIEW_ROWS").as_deref() != Ok("custom") {
+        return Rows::default();
+    }
+    Rows::new(
+        vec![
+            Item::Cpu,
+            Item::GpuUsage(GpuRef::Auto),
+            Item::GpuTemp(GpuRef::Pci("0000:05:00.0".into())),
+            Item::Download(NetRef::All),
+        ],
+        vec![
+            Item::Ram,
+            Item::NvmeTemp(DiskId {
+                model: "Samsung SSD 980 PRO 1TB".into(),
+                name: "nvme0n1".into(),
+            }),
+            // Nearly full: it owns the warning, so only it turns red.
+            Item::DiskUsage("/mnt/storage".into()),
+        ],
+    )
 }
 
 /// The screenshot window's height, which stands for the output's.
@@ -193,6 +244,7 @@ impl cosmic::Application for Preview {
                 Ok("one-line") => Layout::OneLine,
                 _ => Layout::Stacked,
             },
+            rows: rows(),
             popup_layout: popup_layout(),
             ..PanelSettings::default()
         };
@@ -289,6 +341,9 @@ impl cosmic::Application for Preview {
             )
             .into();
         }
+        if panel_only() {
+            return panel_strip(panel, self.core.applet.is_horizontal());
+        }
         // A top panel with the button near its right end, and the popup under the button.
         let panel = widget::container(
             widget::Row::new()
@@ -322,6 +377,45 @@ impl cosmic::Application for Preview {
             }))
             .into()
     }
+}
+
+/// `panel` alone over the backdrop: a top panel holding it near its middle, or a left panel
+/// holding it near its top.
+fn panel_strip<'a>(
+    panel: widget::Container<'a, Message, cosmic::Theme>,
+    horizontal: bool,
+) -> Element<'a, Message> {
+    let style = |theme: &cosmic::Theme| {
+        let cosmic = theme.cosmic();
+        widget::container::Style {
+            text_color: Some(cosmic.background(false).on.into()),
+            icon_color: Some(cosmic.background(false).on.into()),
+            background: Some(Color::from(cosmic.background(false).base).into()),
+            ..widget::container::Style::default()
+        }
+    };
+    let strip: Element<'a, Message> = if horizontal {
+        widget::container(panel)
+            .center_x(Length::Fill)
+            .class(cosmic::theme::Container::custom(style))
+            .into()
+    } else {
+        widget::container(panel.padding([12, 2]))
+            .padding([24, 0])
+            .height(Length::Fill)
+            .class(cosmic::theme::Container::custom(style))
+            .into()
+    };
+    widget::container(strip)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .class(cosmic::theme::Container::custom(|_| {
+            widget::container::Style {
+                background: Some(backdrop()),
+                ..widget::container::Style::default()
+            }
+        }))
+        .into()
 }
 
 /// `content`, as wide as it lays out, in the look of the panel's popup container.

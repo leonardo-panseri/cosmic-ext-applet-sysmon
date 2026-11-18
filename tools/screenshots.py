@@ -7,6 +7,10 @@ backdrop in COSMIC's default dark theme, from fixed made-up stats (nothing is
 read from the system, so no GPU is woken), saves its own window's pixels and
 exits; this script writes them out as a PNG.
 
+The panel-* shots show the panel button alone, in its layouts and on
+vertical panels, to check it by eye; they go to target/screenshots/, not into
+the metainfo.
+
 Needs cargo, a running Wayland session and Python 3.11+ (stdlib only). Usage:
 
     python3 tools/screenshots.py            # all of them
@@ -25,6 +29,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BINARY = ROOT / "target" / "debug" / "cosmic-ext-applet-sysmon"
 OUT_DIR = ROOT / "resources" / "screenshots"
+# Where the panel-only shots go: for checking, not for the metainfo.
+CHECK_DIR = ROOT / "target" / "screenshots"
 # The preview waits 1.5 s before its screenshot; this is the limit for the whole run.
 TIMEOUT = 60
 # libcosmic outlines the window, even with its decorations off; this many pixels are cut off
@@ -38,6 +44,25 @@ SHOTS = {
     "popup": {"SYSMON_PREVIEW_HEIGHT": "920"},
     # The settings page, in the same two-column popup.
     "settings": {"SYSMON_PREVIEW_SETTINGS": "1", "SYSMON_PREVIEW_HEIGHT": "620"},
+}
+
+# The panel button alone, on an S panel unless named otherwise.
+PANEL = {"SYSMON_PREVIEW_PANEL": "1", "COSMIC_PANEL_SIZE": "S"}
+CUSTOM = {**PANEL, "SYSMON_PREVIEW_ROWS": "custom"}
+VERTICAL = {**CUSTOM, "COSMIC_PANEL_ANCHOR": "Left"}
+SHOTS |= {
+    "panel-default": PANEL,
+    "panel-custom-stacked": CUSTOM,
+    "panel-custom-one-line": {**CUSTOM, "SYSMON_PREVIEW_LAYOUT": "one-line"},
+    "panel-custom-stacked-m": {**CUSTOM, "COSMIC_PANEL_SIZE": "M"},
+    "panel-vertical-one-line-s": {**VERTICAL, "SYSMON_PREVIEW_LAYOUT": "one-line"},
+    "panel-vertical-one-line-l": {**VERTICAL, "SYSMON_PREVIEW_LAYOUT": "one-line",
+                                  "COSMIC_PANEL_SIZE": "L"},
+    "panel-vertical-stacked-s": VERTICAL,
+    "panel-vertical-stacked-l": {**VERTICAL, "COSMIC_PANEL_SIZE": "L"},
+    # The default rows' values are all four characters: two columns fit on L.
+    "panel-vertical-stacked-l-default": {**PANEL, "COSMIC_PANEL_ANCHOR": "Left",
+                                         "COSMIC_PANEL_SIZE": "L"},
 }
 
 
@@ -93,10 +118,11 @@ def main() -> int:
         return 2
     # The preview is compiled into debug builds only.
     subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
     for name in names:
         width, height, pixels = crop(*capture(SHOTS[name]), BORDER)
-        out = OUT_DIR / f"{name}.png"
+        out_dir = CHECK_DIR if name.startswith("panel-") else OUT_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{name}.png"
         out.write_bytes(png(width, height, pixels))
         print(f"wrote {out.relative_to(ROOT)} ({width}x{height})")
     return 0

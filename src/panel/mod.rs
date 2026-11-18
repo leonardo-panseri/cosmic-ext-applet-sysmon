@@ -12,8 +12,8 @@ mod limits;
 
 pub use hysteresis::PanelHysteresis;
 #[cfg(test)]
-pub use item::{DiskId, DiskRef};
-pub use item::{GpuRef, Item, NetRef, Row, Rows, ValueKind};
+pub use item::DiskRef;
+pub use item::{DiskId, GpuRef, Item, NetRef, Row, Rows, ValueKind};
 pub use limits::{Limit, LimitKind, NVME_STEP_FROM, NvmeLimit, Unit};
 
 use cosmic::cosmic_config::{self, CosmicConfigEntry, cosmic_config_derive::CosmicConfigEntry};
