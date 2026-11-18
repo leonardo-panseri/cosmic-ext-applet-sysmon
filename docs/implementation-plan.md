@@ -60,7 +60,7 @@ a D-Bus round trip plus a host shell reading every `/proc/<pid>/stat`, on every 
 | Top processes | – | ✓ (probe) |
 | Mounts + space | every 30 s (probe) | every 30 s (probe) |
 
-History (60 samples = 2 min) is kept in both tiers, for CPU, each GPU and network, so the graphs are full as soon
+History (60 samples = 2 min) is kept in both tiers, for CPU, memory and swap, each GPU and network, so the graphs are full as soon
 as the popup opens. That's the same idea as the Omarchy plugin, which measures about 60 ms of CPU per
 minute while closed. We aim for less.
 
@@ -160,16 +160,23 @@ Sections in the reference's order, inside a scrollable area (COSMIC popups have 
 
 1. **CPU header:** big total %, uptime, thread count, load average, package temp; 2-min graph;
    per-core bars (red above 85 %).
-2. **Memory:** in use and swap: used / total, %.
-3. **GPU:** one card per GPU (NVIDIA first). Each shows name, load · temp · power, a 2-min graph, and VRAM used / total.
+2. **Memory:** in use and swap: used / total, %; a 2-min graph (in use above the line, swap below).
+3. **GPU:** one block per GPU (NVIDIA first). Each shows name, load · temp · power, a 2-min graph, and VRAM used / total.
    Suspended cards as in D4. The integrated GPU's "VRAM" is `mem_info_vram_total` (the carve-out).
 4. **Network:** download/upload, a 2-min graph (download above the line, upload below), per interface if more than one.
-5. **Disk:** read/write rates, space per filesystem, NVMe temperatures (model from `/sys/class/nvme/*/model`).
+5. **Disk:** one block per physical disk: its model (`/sys/block/<disk>/device/model`, which for NVMe is the
+   controller's) and temperature, its own read/write rates, and its filesystems with used / total, % and a usage
+   bar. A mount maps to its disk through `/sys/class/block` at discovery: a partition's parent, or a dm/md
+   device's `slaves/`. Mounts on no counted disk (or on several) go in an **Other** block.
 6. **Processes:** top 5 by CPU and top 5 by memory, side by side.
 7. **Footer:** **Process monitor** and **Settings** buttons.
 
 Graphs are our own small `canvas::Program`: an area fill in the accent colour on `bg_component`. Use COSMIC
-symbolic icons, not Nerd Font glyphs.
+symbolic icons, not Nerd Font glyphs. A section with one block per device (GPU, disk, interface) sets the blocks
+apart with space and an inset divider, each headed by the device's name in bold.
+
+Hovering CPU load or temperature, memory in use, or a GPU's load, temperature or VRAM shows a tooltip with the
+lowest and highest value since the applet started, kept in memory by the sampler in both tiers.
 
 ### 2.3 Popup (settings page)
 

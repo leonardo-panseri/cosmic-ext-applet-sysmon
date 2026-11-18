@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! The popup's small canvases (plan §2.2): a 2-minute history graph, an area in the accent colour
-//! on `bg_component`, and the per-core load bars.
+//! on `bg_component`, the per-core load bars and a filesystem's usage bar.
 //!
 //! Each keeps its geometry in a [`canvas::Cache`] and rebuilds it only when the values, the
 //! colours or the size changed, so redraws for other reasons (hover, the other widgets) cost no
@@ -23,6 +23,8 @@ use crate::sampler::history::{HISTORY_LEN, History};
 pub const GRAPH_HEIGHT: f32 = 40.0;
 /// The core bars' height.
 const BAR_HEIGHT: f32 = 8.0;
+/// A usage bar's height.
+const USAGE_BAR_HEIGHT: f32 = 4.0;
 /// The gap between two core bars.
 const BAR_GAP: f32 = 3.0;
 /// The fill's opacity under the line.
@@ -50,6 +52,25 @@ pub fn mirrored<'a>(above: &'a History, below: &'a History) -> Element<'a, Messa
         below: Some(below),
         scale: Scale::Peak,
     })
+}
+
+/// Two percentages against 0–100 each, `above` over a centre line and `below` mirrored under
+/// it: memory and swap in use.
+pub fn mirrored_percent<'a>(above: &'a History, below: &'a History) -> Element<'a, Message> {
+    canvas(HistoryGraph {
+        above,
+        below: Some(below),
+        scale: Scale::Percent,
+    })
+}
+
+/// A thin bar filled to `percent` in the accent colour, or the destructive colour if `warn`: a
+/// filesystem's used space.
+pub fn usage_bar<'a>(percent: f32, warn: bool) -> Element<'a, Message> {
+    cosmic::widget::canvas(UsageBar { percent, warn })
+        .width(Length::Fill)
+        .height(Length::Fixed(USAGE_BAR_HEIGHT))
+        .into()
 }
 
 /// One short bar per core, filled by its load; in the destructive colour at or above `warn`.
@@ -266,6 +287,56 @@ fn area(
             .with_color(colors.accent)
             .with_width(LINE_WIDTH),
     );
+}
+
+struct UsageBar {
+    percent: f32,
+    warn: bool,
+}
+
+impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for UsageBar {
+    type State = Cached;
+
+    fn draw(
+        &self,
+        state: &Cached,
+        renderer: &cosmic::Renderer,
+        theme: &cosmic::Theme,
+        bounds: Rectangle,
+        _cursor: Cursor,
+    ) -> Vec<Geometry<cosmic::Renderer>> {
+        let colors = Colors::of(theme);
+        let key = key(|h| {
+            colors.hash(h);
+            self.percent.to_bits().hash(h);
+            self.warn.hash(h);
+        });
+        vec![state.draw(renderer, bounds, key, |frame| {
+            let size = frame.size();
+            let radius = size.height / 2.0;
+            frame.fill(
+                &Path::rounded_rectangle(Point::ORIGIN, size, radius.into()),
+                with_alpha(colors.text, TRACK_ALPHA),
+            );
+            let share = self.percent.clamp(0.0, 100.0) / 100.0;
+            if share <= 0.0 {
+                return;
+            }
+            let color = if self.warn {
+                colors.warn
+            } else {
+                colors.accent
+            };
+            frame.fill(
+                &Path::rounded_rectangle(
+                    Point::ORIGIN,
+                    Size::new((size.width * share).max(size.height), size.height),
+                    radius.into(),
+                ),
+                color,
+            );
+        })]
+    }
 }
 
 struct CoreBars<'a> {

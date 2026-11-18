@@ -19,14 +19,16 @@ use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sysmon_proto::{Mount, NvidiaState, NvmlSample};
 
 use super::nvml_schedule::{IDLE_INTERVAL, NvmlSchedule, Tick};
-use super::stats::{DriveTemp, GpuSample, Sample};
+use super::stats::{DiskLayout, DriveTemp, GpuSample, Sample};
 use crate::config::VramCache;
 use crate::probe_client::{self, Probe};
+use crate::sources::block::BlockTopology;
 use crate::sources::drm::{self, RuntimeStatus};
 use crate::sources::hwmon::{self, ChipTemp};
 use crate::sources::{
@@ -341,7 +343,12 @@ struct Drive {
     dir: PathBuf,
     device: Option<PathBuf>,
     chip: Chip,
+    /// The disk it is ([`Sample::drive_disks`]), found at each discovery.
+    disk: Option<String>,
 }
+
+/// A drive's temperature, and the disk it is ([`Sample::drive_disks`]).
+type DriveTempOn = (DriveTemp, Option<String>);
 
 /// Every file the closed tier reads.
 #[derive(Debug)]
@@ -359,6 +366,11 @@ pub struct Readers {
     drives: Vec<Drive>,
     /// `/sys/class/hwmon`.
     hwmon: PathBuf,
+    /// `/sys/block` and `/sys/class/block`.
+    sys_block: PathBuf,
+    class_block: PathBuf,
+    /// The disks' models and how block devices stack, from the last discovery.
+    disk_layout: Arc<DiskLayout>,
     probe: Box<dyn Probe>,
     /// When to ask the probe for NVIDIA stats (ADR 0003).
     nvml: NvmlSchedule,
@@ -368,8 +380,8 @@ pub struct Readers {
     vram: VramCache,
     /// The last mounts and when they were asked for.
     mounts: Option<(Instant, Vec<Mount>)>,
-    /// The last drive temperatures and when they were read.
-    drive_temps: Option<(Instant, Vec<DriveTemp>)>,
+    /// The last drive temperatures, with each drive's disk, and when they were read.
+    drive_temps: Option<(Instant, Vec<DriveTempOn>)>,
     discovered_at: Option<Instant>,
     /// A read failed: look for devices again on the next tick.
     failed: bool,
@@ -392,6 +404,9 @@ impl Readers {
             cpu_chip: None,
             drives: Vec::new(),
             hwmon: PathBuf::from("/sys/class/hwmon"),
+            sys_block: PathBuf::from("/sys/block"),
+            class_block: PathBuf::from("/sys/class/block"),
+            disk_layout: Arc::default(),
             probe,
             nvml: NvmlSchedule::default(),
             nvml_samples: HashMap::new(),
@@ -413,7 +428,7 @@ impl Readers {
             self.discovered_at = Some(now);
             self.failed = false;
         }
-        let drives = self.drives(now);
+        let (drives, drive_disks) = self.drives(now).into_iter().unzip();
         let failed = &mut self.failed;
         let read = |slot: &mut Option<Pread>, failed: &mut bool| {
             slot.as_mut().and_then(|f| {
@@ -452,9 +467,11 @@ impl Readers {
                 _ => None,
             },
             drives,
+            drive_disks,
             gpus: self.cards.iter_mut().map(|c| c.sample(failed)).collect(),
             mounts: Vec::new(),
             processes: None,
+            disk_layout: Arc::clone(&self.disk_layout),
         };
         // After the counters, so a slow probe doesn't skew the rates measured from `now`.
         sample.mounts = self.mounts(now);
@@ -540,8 +557,8 @@ impl Readers {
         }
     }
 
-    /// The drives' temperatures, reread every [`DRIVE_TEMP_EVERY`].
-    fn drives(&mut self, now: Instant) -> Vec<DriveTemp> {
+    /// The drives' temperatures, each with its disk, reread every [`DRIVE_TEMP_EVERY`].
+    fn drives(&mut self, now: Instant) -> Vec<DriveTempOn> {
         if let Some((at, temps)) = &self.drive_temps
             && now.duration_since(*at) < DRIVE_TEMP_EVERY
         {
@@ -551,11 +568,14 @@ impl Readers {
             .drives
             .iter_mut()
             .filter_map(|d| match d.chip.read() {
-                Some(ChipTemp::Nvme { celsius, limit }) => Some(DriveTemp {
-                    name: d.name.clone(),
-                    celsius,
-                    limit,
-                }),
+                Some(ChipTemp::Nvme { celsius, limit }) => Some((
+                    DriveTemp {
+                        name: d.name.clone(),
+                        celsius,
+                        limit,
+                    },
+                    d.disk.clone(),
+                )),
                 _ => None,
             })
             .collect();
@@ -591,9 +611,55 @@ impl Readers {
         reopen(&mut self.net_dev, "/proc/net/dev");
         reopen(&mut self.diskstats, "/proc/diskstats");
         self.physical_net = discover::names_with_device_link(Path::new("/sys/class/net"));
-        self.physical_disks = discover::names_with_device_link(Path::new("/sys/block"));
+        self.physical_disks = discover::names_with_device_link(&self.sys_block);
         self.discover_cards();
         self.discover_chips();
+        self.discover_disks();
+    }
+
+    /// Names the physical disks, maps block devices to them, and says which disk each drive's
+    /// chip is: only links, directory names and `model` files, never a drive's sensors. Block
+    /// devices never live under a GPU's PCI device, so nothing here touches a card (D3).
+    fn discover_disks(&mut self) {
+        let mut paths = Vec::new();
+        let mut models = HashMap::new();
+        for name in &self.physical_disks {
+            if diskstats::is_virtual(name) {
+                continue;
+            }
+            let dir = self.sys_block.join(name);
+            // An NVMe namespace's `device` is its controller, which has the model too.
+            if let Some(model) = std::fs::read_to_string(dir.join("device/model"))
+                .ok()
+                .and_then(|m| nvme::parse_model(&m))
+            {
+                models.insert(name.clone(), model);
+            }
+            if let Ok(path) = std::fs::canonicalize(&dir) {
+                paths.push((name.clone(), path));
+            }
+        }
+        for drive in &mut self.drives {
+            // An `nvme` chip's device is the controller; its namespaces are the disks under it.
+            drive.disk = drive.device.as_ref().and_then(|controller| {
+                paths
+                    .iter()
+                    .filter(|(_, path)| path.starts_with(controller))
+                    .map(|(name, _)| name.clone())
+                    .min()
+            });
+        }
+        if let Some((_, temps)) = &mut self.drive_temps {
+            for (temp, disk) in temps {
+                if let Some(drive) = self.drives.iter().find(|d| d.name == temp.name) {
+                    disk.clone_from(&drive.disk);
+                }
+            }
+        }
+        self.disk_layout = Arc::new(DiskLayout {
+            models,
+            topology: BlockTopology::read(&self.class_block),
+        });
     }
 
     fn discover_cards(&mut self) {
@@ -712,13 +778,14 @@ impl Readers {
                         dir,
                         device,
                         chip,
+                        disk: None,
                     });
                 }
                 _ => {}
             }
         }
         if let Some((_, temps)) = &mut self.drive_temps {
-            temps.retain(|t| self.drives.iter().any(|d| d.name == t.name));
+            temps.retain(|(t, _)| self.drives.iter().any(|d| d.name == t.name));
         }
     }
 }
@@ -981,6 +1048,49 @@ mod tests {
         assert_eq!(
             readers.read(later, Wants::default()).drives,
             [drive(40.0, 70.0)]
+        );
+    }
+
+    #[test]
+    fn discovery_names_each_disk_and_finds_the_disk_of_each_nvme_chip() {
+        use std::os::unix::fs::symlink;
+        // Shaped like the reference laptop: /sys/block/<disk> links into the controller's
+        // device directory, and the controller's hwmon chip links to the controller.
+        let hwmon = FakeHwmon::new("disks", "40000", "70000");
+        let sys = hwmon.0.join("sys");
+        let controller = sys.join("devices/pci0000:00/0000:00:02.4/0000:05:00.0/nvme/nvme0");
+        let namespace = controller.join("nvme0n1");
+        std::fs::create_dir_all(namespace.join("nvme0n1p1")).unwrap();
+        std::fs::write(namespace.join("nvme0n1p1/partition"), "1\n").unwrap();
+        std::fs::write(controller.join("model"), "Micron_2400_MTFDKBA512QFM   \n").unwrap();
+        symlink(&controller, namespace.join("device")).unwrap();
+        symlink(&controller, hwmon.0.join("hwmon0/device")).unwrap();
+        // A SATA disk without a model file is named after its device.
+        let sata = sys.join("devices/ata1/host0/target0:0:0/0:0:0:0");
+        std::fs::create_dir_all(sata.join("block/sda")).unwrap();
+        symlink(&sata, sata.join("block/sda/device")).unwrap();
+        let class = sys.join("class/block");
+        std::fs::create_dir_all(&class).unwrap();
+        symlink(&namespace, class.join("nvme0n1")).unwrap();
+        symlink(namespace.join("nvme0n1p1"), class.join("nvme0n1p1")).unwrap();
+        symlink(sata.join("block/sda"), class.join("sda")).unwrap();
+
+        let mut readers = hwmon.readers();
+        readers.sys_block.clone_from(&class);
+        readers.class_block.clone_from(&class);
+        let sample = readers.read(Instant::now(), Wants::default());
+        let names: Vec<_> = sample.drives.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Micron_2400_MTFDKBA512QFM"]);
+        assert_eq!(sample.drive_disks, [Some("nvme0n1".to_owned())]);
+        let layout = &sample.disk_layout;
+        assert_eq!(
+            layout.models.get("nvme0n1").map(String::as_str),
+            Some("Micron_2400_MTFDKBA512QFM")
+        );
+        assert_eq!(layout.models.get("sda"), None);
+        assert_eq!(
+            layout.topology.whole_disk("/dev/nvme0n1p1"),
+            Some("nvme0n1")
         );
     }
 
