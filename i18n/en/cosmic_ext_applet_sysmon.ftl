@@ -66,10 +66,21 @@ layout-compact = Compact
 row-cpu-temp = CPU °C
 setting-network = Network speed
 setting-network-description = Download and upload
-setting-warn-temp = Temperature
-setting-warn-temp-description = CPU or GPU, in °C
-setting-warn-usage = Memory or disk
-setting-warn-usage-description = Percent full
+setting-process-monitor = Process monitor
+setting-process-monitor-hint = Desktop ID or command
+setting-process-monitor-reset = Reset to default
+# The warnings, each with its limit and a switch.
+setting-warn-cpu-temp = CPU temperature
+setting-warn-gpu-temp = GPU temperature
+setting-warn-memory = Memory
+setting-warn-swap = Swap
+setting-warn-disk = Disk
+setting-warn-disk-description = Any filesystem
+setting-warn-vram = VRAM
+setting-warn-nvme = NVMe temperature
+setting-warn-nvme-description = Empty: rated limit
+# The NVMe limit's field while it is each drive's own rated limit.
+setting-limit-rated = Rated
 
 ## Panel button: the tooltip, one line per warning
 
@@ -77,6 +88,11 @@ warning-cpu-temp = CPU at { $celsius }°C, limit { $limit }°C
 # $gpu is the model, or "GPU card1" (gpu-unnamed).
 warning-gpu-temp = { $gpu } at { $celsius }°C, limit { $limit }°C
 warning-memory = Memory { $percent }% full, limit { $limit }%
+warning-swap = Swap { $percent }% full, limit { $limit }%
 warning-filesystem = { $mount } { $percent }% full, limit { $limit }%
+# $gpu is the model, or "GPU card1" (gpu-unnamed).
+warning-vram = { $gpu } VRAM { $percent }% full, limit { $limit }%
 # An NVMe drive, against the limit its maker rates it for.
 warning-nvme = { $drive } at { $celsius }°C, its limit { $limit }°C
+# An NVMe drive, against the limit set in the settings instead.
+warning-nvme-override = { $drive } at { $celsius }°C, limit { $limit }°C

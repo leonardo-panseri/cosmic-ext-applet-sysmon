@@ -87,16 +87,19 @@ impl Core {
     }
 
     /// What the current tier reads beyond the closed tier: the processes while the popup is
-    /// open, NVIDIA stats too, or whenever the panel button shows `gpu` (D2).
+    /// open, NVIDIA stats too, or whenever the panel button shows `gpu` or a GPU temperature or
+    /// VRAM warning is on (D2). NVML is still asked only while a card is awake, with the back-off
+    /// of ADR 0003 ([`super::nvml_schedule`]).
     #[must_use]
     pub fn wants(&self) -> Wants {
         let gpu_shown = self
             .settings
             .shown_rows(self.layout())
             .contains(&RowKind::Gpu);
+        let nvidia_warns = self.settings.warn_gpu_temp.on || self.settings.warn_vram.on;
         Wants {
             processes: self.popup_open,
-            nvml: self.popup_open || gpu_shown,
+            nvml: self.popup_open || gpu_shown || nvidia_warns,
         }
     }
 
@@ -185,6 +188,8 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panel::Limit;
+    use crate::sampler::nvml_schedule::{NvmlSchedule, Tick};
     use crate::sources::meminfo::MemInfo;
 
     fn memory(percent: u64) -> Sample {
@@ -282,7 +287,7 @@ mod tests {
     fn a_gpu_row_hidden_by_a_vertical_panel_wants_no_nvml() {
         let mut core = Core::new(PanelSettings {
             bottom: RowKind::Gpu,
-            ..PanelSettings::default()
+            ..no_nvidia_warnings()
         });
         assert!(core.wants().nvml);
         core.control(Control::Horizontal(false));
@@ -371,7 +376,7 @@ mod tests {
         let mut core = Core::new(PanelSettings::default());
         core.sample(memory(80), Instant::now());
         let strict = PanelSettings {
-            warn_usage: 75,
+            warn_memory: Limit::on(75),
             ..PanelSettings::default()
         };
         let update = core.control(Control::Settings(strict)).unwrap();
@@ -400,9 +405,61 @@ mod tests {
         assert!(core.control(Control::Settings(hidden_rates)).is_none());
     }
 
+    /// The default settings with both NVIDIA warnings off.
+    fn no_nvidia_warnings() -> PanelSettings {
+        PanelSettings {
+            warn_gpu_temp: Limit::off(85),
+            warn_vram: Limit::off(90),
+            ..PanelSettings::default()
+        }
+    }
+
+    /// Whether the closed tier asks NVML on its first tick, with the card `awake` or not.
+    fn asks_nvml(core: &Core, awake: bool) -> bool {
+        NvmlSchedule::default().due(Tick {
+            now: Instant::now(),
+            awake,
+            wanted: core.wants().nvml,
+        })
+    }
+
+    #[test]
+    fn an_nvidia_warning_asks_nvml_with_the_popup_closed_only_while_awake() {
+        // The defaults: CPU and memory rows, the GPU temperature warning on.
+        let core = Core::new(PanelSettings::default());
+        assert!(core.wants().nvml);
+        assert!(asks_nvml(&core, true));
+        assert!(!asks_nvml(&core, false));
+        let vram_only = Core::new(PanelSettings {
+            warn_vram: Limit::on(90),
+            ..no_nvidia_warnings()
+        });
+        assert!(asks_nvml(&vram_only, true));
+        assert!(!asks_nvml(&vram_only, false));
+    }
+
+    #[test]
+    fn without_nvidia_warnings_or_a_gpu_row_nvml_isn_t_wanted() {
+        let core = Core::new(no_nvidia_warnings());
+        assert_eq!(core.wants(), Wants::default());
+        assert!(!asks_nvml(&core, true));
+    }
+
+    #[test]
+    fn turning_an_nvidia_warning_on_or_off_takes_effect_at_once() {
+        let mut core = Core::new(no_nvidia_warnings());
+        core.control(Control::Settings(PanelSettings {
+            warn_gpu_temp: Limit::on(85),
+            ..no_nvidia_warnings()
+        }));
+        assert!(core.wants().nvml);
+        core.control(Control::Settings(no_nvidia_warnings()));
+        assert!(!core.wants().nvml);
+    }
+
     #[test]
     fn nvml_is_wanted_while_open_or_with_gpu_on_the_panel_button() {
-        let mut core = Core::new(PanelSettings::default());
+        let mut core = Core::new(no_nvidia_warnings());
         assert_eq!(core.wants(), Wants::default());
         core.control(Control::PopupOpen(true));
         assert_eq!(
@@ -415,7 +472,7 @@ mod tests {
         core.control(Control::PopupOpen(false));
         core.control(Control::Settings(PanelSettings {
             bottom: RowKind::Gpu,
-            ..PanelSettings::default()
+            ..no_nvidia_warnings()
         }));
         assert_eq!(
             core.wants(),
@@ -428,7 +485,7 @@ mod tests {
         core.control(Control::Settings(PanelSettings {
             bottom: RowKind::Gpu,
             layout: Layout::Compact,
-            ..PanelSettings::default()
+            ..no_nvidia_warnings()
         }));
         assert!(!core.wants().nvml);
     }

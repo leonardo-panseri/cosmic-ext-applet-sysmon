@@ -184,6 +184,18 @@ fn warning_text(warning: &Warning) -> String {
         Warning::Memory { percent, limit } => {
             fl!("warning-memory", percent = percent, limit = limit)
         }
+        Warning::Swap { percent, limit } => {
+            fl!("warning-swap", percent = percent, limit = limit)
+        }
+        Warning::Vram {
+            card,
+            name,
+            percent,
+            limit,
+        } => {
+            let gpu = name.unwrap_or_else(|| fl!("gpu-unnamed", card = card));
+            fl!("warning-vram", gpu = gpu, percent = percent, limit = limit)
+        }
         Warning::Filesystem {
             mount,
             percent,
@@ -198,8 +210,20 @@ fn warning_text(warning: &Warning) -> String {
             drive,
             celsius,
             limit,
-        } => fl!(
+            rated,
+        } if rated => fl!(
             "warning-nvme",
+            drive = drive,
+            celsius = celsius,
+            limit = limit
+        ),
+        Warning::Nvme {
+            drive,
+            celsius,
+            limit,
+            ..
+        } => fl!(
+            "warning-nvme-override",
             drive = drive,
             celsius = celsius,
             limit = limit
@@ -312,9 +336,19 @@ mod tests {
                     celsius: 88,
                     limit: 85,
                 },
+                Warning::Vram {
+                    card: "card0".into(),
+                    name: Some("RTX 4060".into()),
+                    percent: 96,
+                    limit: 90,
+                },
                 Warning::Memory {
                     percent: 93,
                     limit: 90,
+                },
+                Warning::Swap {
+                    percent: 61,
+                    limit: 50,
                 },
                 Warning::Filesystem {
                     mount: "/mnt/storage".into(),
@@ -325,6 +359,13 @@ mod tests {
                     drive: "Samsung SSD 980 PRO".into(),
                     celsius: 74,
                     limit: 70,
+                    rated: true,
+                },
+                Warning::Nvme {
+                    drive: "WD SN770".into(),
+                    celsius: 66,
+                    limit: 65,
+                    rated: false,
                 },
             ],
         };
@@ -332,9 +373,12 @@ mod tests {
             plain(&tooltip(Some(&summary))),
             "CPU at 91°C, limit 85°C\n\
              GPU card1 at 88°C, limit 85°C\n\
+             RTX 4060 VRAM 96% full, limit 90%\n\
              Memory 93% full, limit 90%\n\
+             Swap 61% full, limit 50%\n\
              /mnt/storage 97% full, limit 90%\n\
-             Samsung SSD 980 PRO at 74°C, its limit 70°C"
+             Samsung SSD 980 PRO at 74°C, its limit 70°C\n\
+             WD SN770 at 66°C, limit 65°C"
         );
     }
 

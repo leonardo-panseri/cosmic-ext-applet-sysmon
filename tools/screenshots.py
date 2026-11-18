@@ -38,7 +38,7 @@ SHOTS = {
     # The whole stats page at once, cut in two halves side by side.
     "popup-full": {"SYSMON_PREVIEW_FULL": "1", "SYSMON_PREVIEW_HEIGHT": "860"},
     # The settings page.
-    "settings": {"SYSMON_PREVIEW_SETTINGS": "1", "SYSMON_PREVIEW_HEIGHT": "640"},
+    "settings": {"SYSMON_PREVIEW_SETTINGS": "1", "SYSMON_PREVIEW_HEIGHT": "900"},
 }
 
 

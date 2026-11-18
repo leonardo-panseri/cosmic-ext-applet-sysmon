@@ -37,7 +37,7 @@ use crate::sources::loadavg::LoadAvg;
 use crate::sources::meminfo::MemInfo;
 use crate::ui::panel_button::panel_button;
 use crate::ui::popup::{self, Page};
-use crate::ui::settings::SettingsModels;
+use crate::ui::settings::{SettingChange, SettingsModels};
 use crate::{redraws, sampler};
 use sysmon_proto::{Mount, Process, TopProcesses};
 
@@ -90,6 +90,16 @@ struct Preview {
     sampler: Option<sampler::SamplerHandle>,
     /// When the last live sample arrived, for the redraw counts.
     last_sample: Option<Instant>,
+}
+
+impl Preview {
+    /// Makes `change` on the settings page, here only: the preview stores nothing.
+    fn change_setting(&mut self, change: SettingChange) {
+        self.settings = self.models.changed(change, &self.settings);
+        self.models.select(&self.settings);
+        let layout = self.settings.layout_for(self.core.applet.is_horizontal());
+        self.summary = PanelSummary::new(&self.stats, &self.settings, layout);
+    }
 }
 
 impl cosmic::Application for Preview {
@@ -166,15 +176,15 @@ impl cosmic::Application for Preview {
                 self.summary = update.panel;
                 self.stats = update.stats;
             }
-            Message::ShowPage(page) => self.page = page,
-            Message::OpenProcessMonitor => eprintln!("preview: would open the process monitor"),
-            // Applied here only: the preview stores nothing.
-            Message::Setting(change) => {
-                self.settings = self.models.changed(change, &self.settings);
-                self.models.select(&self.settings);
-                let layout = self.settings.layout_for(self.core.applet.is_horizontal());
-                self.summary = PanelSummary::new(&self.stats, &self.settings, layout);
+            Message::ShowPage(page) => {
+                self.change_setting(SettingChange::CommitAll);
+                self.page = page;
             }
+            Message::OpenProcessMonitor => eprintln!(
+                "preview: would open the process monitor {:?}",
+                self.settings.process_monitor
+            ),
+            Message::Setting(change) => self.change_setting(change),
             _ => {}
         }
         Task::none()

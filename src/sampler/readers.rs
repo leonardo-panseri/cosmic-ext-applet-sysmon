@@ -55,7 +55,7 @@ const NVML_HOLD: Duration = IDLE_INTERVAL.saturating_add(Duration::from_secs(5))
 pub struct Wants {
     /// The top processes: the popup is open.
     pub processes: bool,
-    /// NVIDIA stats: the popup is open or the panel button shows `gpu` (D2).
+    /// NVIDIA stats: popup open, `gpu` on the panel button, or an NVIDIA warning on (D2).
     pub nvml: bool,
 }
 
