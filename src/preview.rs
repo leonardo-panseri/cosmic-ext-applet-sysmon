@@ -10,7 +10,9 @@
 //! default dark theme, saves the window's pixels to `<file>` and exits. `SYSMON_PREVIEW_HEIGHT`
 //! sets the window's height in that mode, and `SYSMON_PREVIEW_FULL=1` shows the whole stats page
 //! at once, cut in two halves side by side, instead of scrolling it. `SYSMON_PREVIEW_SETTINGS=1`
-//! starts on the settings page. The file is `RGBA`, the width and height as
+//! starts on the settings page. `SYSMON_PREVIEW_LAYOUT=stacked|one-line|compact` picks the panel
+//! button's layout, and `COSMIC_PANEL_SIZE` (`XS`…`XL`) and `COSMIC_PANEL_ANCHOR` (`Left` for a
+//! vertical panel) its panel, as libcosmic reads them. The file is `RGBA`, the width and height as
 //! little-endian `u32`s, then the pixels; `tools/screenshots.py` turns it into a PNG.
 //!
 //! `SYSMON_PREVIEW_LIVE=1` instead feeds the preview from the real sampler, as the panel does
@@ -28,7 +30,7 @@ use cosmic::prelude::*;
 use cosmic::widget;
 
 use crate::app::{self, Message};
-use crate::panel::{PanelSettings, PanelSummary};
+use crate::panel::{Layout, PanelSettings, PanelSummary};
 use crate::sampler::history::{HISTORY_LEN, History};
 use crate::sampler::rates::PairRate;
 use crate::sampler::stats::{DeviceRate, DriveTemp, GpuSample, Histories, InterfaceHistory, Stats};
@@ -120,7 +122,14 @@ impl cosmic::Application for Preview {
         };
         let live = shot.is_none() && std::env::var_os("SYSMON_PREVIEW_LIVE").is_some();
         let stats = Arc::new(fixture());
-        let settings = PanelSettings::default();
+        let settings = PanelSettings {
+            layout: match std::env::var("SYSMON_PREVIEW_LAYOUT").as_deref() {
+                Ok("one-line") => Layout::OneLine,
+                Ok("compact") => Layout::Compact,
+                _ => Layout::Stacked,
+            },
+            ..PanelSettings::default()
+        };
         let summary = PanelSummary::new(
             &stats,
             &settings,

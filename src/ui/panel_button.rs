@@ -2,7 +2,7 @@
 
 //! The panel button (plan §2.1): one of three layouts of a [`PanelSummary`], each row an icon and
 //! a value, with fixed-size icons and fixed-width value cells so a changing value never re-lays
-//! out the panel (D6).
+//! out the panel (D6). A value starts right after its icon; items are further apart.
 
 use std::borrow::Cow;
 
@@ -31,6 +31,12 @@ const ONE_LINE_FONT_SHARE: f32 = 0.35;
 
 /// The smallest panel font size, so XS panels stay readable.
 const MIN_FONT_SIZE: f32 = 9.0;
+
+/// The gap between an icon and its own value, relative to the font size.
+const ICON_GAP: f32 = 0.3;
+
+/// The gap between one item (an icon and its value) and the next, relative to the font size.
+const ITEM_GAP: f32 = 0.6;
 
 /// Advance width of one monospace glyph, relative to the font size (Noto Sans Mono, COSMIC's
 /// default monospace font, and most others are 0.6 em).
@@ -78,7 +84,7 @@ pub fn panel_button<'a>(
         ]
     });
 
-    let (icon_width, icon_height) = applet.suggested_size(true);
+    let (_, icon_height) = applet.suggested_size(true);
     let (major_padding, minor_padding) = applet.suggested_padding(true);
     let height = f32::from(icon_height + 2 * minor_padding);
     let button = match layout {
@@ -95,10 +101,11 @@ pub fn panel_button<'a>(
                 })
                 .unzip();
             // A column of icons beside a column of values, so the values line up.
-            let mut content = row![
+            let mut items = vec![item(
                 widget::Column::with_children(icons),
                 widget::Column::with_children(values),
-            ];
+                size,
+            )];
             if let Some(rates) = rates {
                 let (arrows, rates): (Vec<_>, Vec<_>) = rates
                     .into_iter()
@@ -109,47 +116,63 @@ pub fn panel_button<'a>(
                         )
                     })
                     .unzip();
-                content = content
-                    .push(widget::Column::with_children(arrows))
-                    .push(widget::Column::with_children(rates));
+                items.push(item(
+                    widget::Column::with_children(arrows),
+                    widget::Column::with_children(rates),
+                    size,
+                ));
             }
-            text_button(content.spacing(size / 2.0), height, major_padding)
+            text_button(items_row(items, size), height, major_padding)
         }
-        Layout::OneLine => {
+        Layout::Compact if !applet.is_horizontal() => match rows.into_iter().next() {
+            Some(row) => vertical_button(applet, row),
+            None => applet.button_from_element(widget::Space::new(), true),
+        },
+        // On a horizontal panel only the height limits Compact: its one row on one line.
+        Layout::OneLine | Layout::Compact => {
             let size = font_size(height, ONE_LINE_FONT_SHARE);
-            let mut content = widget::Row::new();
-            for row in rows {
-                content = content
-                    .push(row_icon(row.kind, size, row.warn))
-                    .push(value_cell(
-                        row.value,
-                        row.kind.widest_value(),
+            let mut items: Vec<_> = rows
+                .into_iter()
+                .map(|row| {
+                    item(
+                        row_icon(row.kind, size, row.warn),
+                        value_cell(row.value, row.kind.widest_value(), size, row.warn),
                         size,
-                        row.warn,
-                    ));
-            }
-            for (arrow, rate) in rates.into_iter().flatten() {
-                content = content
-                    .push(panel_text(arrow, size, button_warns))
-                    .push(value_cell(rate, format::WIDEST_RATE, size, button_warns));
-            }
-            text_button(content.spacing(size / 3.0), height, major_padding)
-        }
-        Layout::Compact => {
-            let Some(row) = rows.into_iter().next() else {
-                return applet.button_from_element(widget::Space::new(), true);
-            };
-            let widest = row.kind.widest_value();
-            // The value may use the icon's width and half the padding beside it.
-            let room = f32::from(icon_width + minor_padding);
-            #[expect(clippy::cast_precision_loss, reason = "a few characters")]
-            let chars = widest.chars().count() as f32;
-            let size = (room / (chars * MONO_ADVANCE)).floor().max(MIN_FONT_SIZE);
-            applet.button_from_element(value_cell(row.value, widest, size, row.warn), true)
+                    )
+                })
+                .collect();
+            items.extend(rates.into_iter().flatten().map(|(arrow, rate)| {
+                item(
+                    panel_text(arrow, size, button_warns),
+                    value_cell(rate, format::WIDEST_RATE, size, button_warns),
+                    size,
+                )
+            }));
+            text_button(items_row(items, size), height, major_padding)
         }
     };
     // On press, not release, like COSMIC's own applets.
     button.on_press_down(Message::TogglePopup)
+}
+
+/// The Compact button of a vertical panel, as square as an icon button: the value may use the
+/// icon's width and half the padding beside it, and the icon goes above it, both centred, if the
+/// button's height leaves room.
+fn vertical_button<'a>(applet: &Context, row: Row) -> widget::Button<'a, Message> {
+    let (icon_width, icon_height) = applet.suggested_size(true);
+    let (major_padding, minor_padding) = applet.suggested_padding(true);
+    let widest = row.kind.widest_value();
+    let room = f32::from(icon_width + minor_padding);
+    #[expect(clippy::cast_precision_loss, reason = "a few characters")]
+    let chars = widest.chars().count() as f32;
+    let size = (room / (chars * MONO_ADVANCE)).floor().max(MIN_FONT_SIZE);
+    let mut content = widget::Column::new().align_x(Alignment::Center);
+    // On a vertical panel the major (shrinkable) padding is above and below.
+    if 2.0 * size * LINE_HEIGHT <= f32::from(icon_height + 2 * major_padding) {
+        content = content.push(row_icon(row.kind, size, row.warn));
+    }
+    let value = value_cell_aligned(row.value, widest, size, row.warn, Alignment::Center);
+    applet.button_from_element(content.push(value), true)
 }
 
 /// The panel button's tooltip: the active warnings, one per line. Empty without warnings.
@@ -244,12 +267,24 @@ fn text_button<'a>(
         .class(cosmic::theme::Button::AppletIcon)
 }
 
-/// A value, right-aligned in a cell exactly as wide as `widest`.
+/// A value, left-aligned in a cell exactly as wide as `widest`, so it starts right after its
+/// icon and the room a shorter value leaves falls between items.
 fn value_cell<'a>(
     value: String,
     widest: &'static str,
     size: f32,
     warn: bool,
+) -> Element<'a, Message> {
+    value_cell_aligned(value, widest, size, warn, Alignment::Start)
+}
+
+/// A value, aligned per `align` in a cell exactly as wide as `widest`.
+fn value_cell_aligned<'a>(
+    value: String,
+    widest: &'static str,
+    size: f32,
+    warn: bool,
+    align: Alignment,
 ) -> Element<'a, Message> {
     let mono = cosmic::font::mono();
     // The stack takes the size of its first layer: the widest value, drawn invisibly.
@@ -257,9 +292,29 @@ fn value_cell<'a>(
         panel_text(widest, size, false)
             .font(mono)
             .class(cosmic::theme::Text::Color(Color::TRANSPARENT)),
-        widget::container(panel_text(value, size, warn).font(mono)).align_right(Length::Fill),
+        widget::container(panel_text(value, size, warn).font(mono))
+            .width(Length::Fill)
+            .align_x(align),
     ]
     .into()
+}
+
+/// One item of the panel button: an icon (or arrow) and its value, close together.
+fn item<'a>(
+    icon: impl Into<Element<'a, Message>>,
+    value: impl Into<Element<'a, Message>>,
+    size: f32,
+) -> Element<'a, Message> {
+    row![icon.into(), value.into()]
+        .spacing((size * ICON_GAP).round())
+        .into()
+}
+
+/// The panel button's items side by side, further apart than an icon from its value.
+fn items_row(items: Vec<Element<'_, Message>>, size: f32) -> Element<'_, Message> {
+    widget::Row::with_children(items)
+        .spacing((size * ITEM_GAP).round())
+        .into()
 }
 
 /// Panel text at `size`, in the theme's interface font; in the destructive colour if `warn`.

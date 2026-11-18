@@ -8,8 +8,9 @@
 //! as `statm`'s second field), so `statm` is not read. Only the winners' `cmdline` is read, to
 //! complete names the kernel cut at 15 characters.
 //!
-//! **CPU %** is the difference against the previous scan, in percent of one core:
-//! `Δticks / (Δjiffies of all CPUs / cores) × 100`, as `top` shows it. Both counters come from
+//! **CPU %** is the difference against the previous scan, in percent of the whole CPU:
+//! `Δticks / Δjiffies of all CPUs × 100`, as GNOME's and COSMIC's system monitors show it, so
+//! 100 % is every core busy (`top` shows percent of one core instead). Both counters come from
 //! the kernel in the same unit, so no clock or `CLK_TCK` is involved. A scan with no previous
 //! one, or one older than [`STALE_AFTER`] (the popup was closed meanwhile), first takes a
 //! baseline and waits [`BASELINE`], so the first list after opening the popup is already real.
@@ -75,38 +76,24 @@ pub fn parse_stat(text: &str) -> Option<PidStat> {
     })
 }
 
-/// The `cpu` line of `/proc/stat` summed, and the number of `cpuN` lines.
+/// The `cpu` line of `/proc/stat` summed: the CPU time of all cores together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuTotal {
     pub jiffies: u64,
-    pub cores: u32,
 }
 
 /// Parses `/proc/stat` into a [`CpuTotal`].
 #[must_use]
 pub fn parse_cpu_total(text: &str) -> Option<CpuTotal> {
-    let mut jiffies = None;
-    let mut cores = 0;
-    for line in text.lines() {
-        let mut fields = line.split_ascii_whitespace();
-        match fields.next() {
-            Some("cpu") => {
-                // guest and guest_nice are already counted in user and nice.
-                jiffies = Some(
-                    fields
-                        .take(8)
-                        .filter_map(|f| f.parse::<u64>().ok())
-                        .fold(0u64, u64::saturating_add),
-                );
-            }
-            Some(name) if name.starts_with("cpu") => cores += 1,
-            _ => {}
-        }
-    }
-    Some(CpuTotal {
-        jiffies: jiffies?,
-        cores,
-    })
+    let line = text.lines().find(|line| line.starts_with("cpu "))?;
+    // guest and guest_nice are already counted in user and nice.
+    let jiffies = line
+        .split_ascii_whitespace()
+        .skip(1)
+        .take(8)
+        .filter_map(|f| f.parse::<u64>().ok())
+        .fold(0u64, u64::saturating_add);
+    Some(CpuTotal { jiffies })
 }
 
 /// Everything one scan read.
@@ -120,26 +107,25 @@ pub struct Snapshot {
 /// every CPU value is 0. Ties keep the lower PID first.
 #[must_use]
 pub fn top(prev: Option<&Snapshot>, cur: &Snapshot, top: usize, page_size: u64) -> TopProcesses {
-    let per_core = prev.and_then(|prev| {
+    let elapsed = prev.and_then(|prev| {
         let elapsed = cur.total.jiffies.checked_sub(prev.total.jiffies)?;
         #[expect(clippy::cast_precision_loss, reason = "percentages")]
-        let per_core = elapsed as f64 / f64::from(cur.total.cores.max(1));
-        (per_core > 0.0).then_some(per_core)
+        let elapsed = elapsed as f64;
+        (elapsed > 0.0).then_some(elapsed)
     });
     let before: HashMap<u32, &PidStat> = prev.map_or_else(HashMap::new, |p| {
         p.pids.iter().map(|s| (s.pid, s)).collect()
     });
-    let max = f64::from(cur.total.cores.max(1)) * 100.0;
     let processes: Vec<Process> = cur
         .pids
         .iter()
         .map(|s| {
-            let cpu = per_core
+            let cpu = elapsed
                 .zip(before.get(&s.pid).filter(|b| b.start == s.start))
-                .map_or(0.0, |(per_core, b)| {
+                .map_or(0.0, |(elapsed, b)| {
                     #[expect(clippy::cast_precision_loss, reason = "percentages")]
                     let busy = s.ticks.saturating_sub(b.ticks) as f64;
-                    (busy / per_core * 100.0).clamp(0.0, max)
+                    (busy / elapsed * 100.0).clamp(0.0, 100.0)
                 });
             Process {
                 pid: s.pid,
@@ -311,7 +297,7 @@ mod tests {
 
     fn snapshot(jiffies: u64, pids: Vec<PidStat>) -> Snapshot {
         Snapshot {
-            total: CpuTotal { jiffies, cores: 4 },
+            total: CpuTotal { jiffies },
             pids,
         }
     }
@@ -363,22 +349,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_cpu_total_sums_the_cpu_line_and_counts_cores() {
+    fn parse_cpu_total_sums_the_cpu_line() {
         let text = "cpu  10 1 5 100 4 1 2 3 7 7\ncpu0 5 0 2 50 2 0 1 1 0 0\n\
                     cpu1 5 1 3 50 2 1 1 2 0 0\nintr 1 2 3\nctxt 99\n";
-        assert_eq!(
-            parse_cpu_total(text),
-            Some(CpuTotal {
-                jiffies: 126,
-                cores: 2
-            })
-        );
+        assert_eq!(parse_cpu_total(text), Some(CpuTotal { jiffies: 126 }));
         assert_eq!(parse_cpu_total("intr 1\n"), None);
     }
 
     #[test]
-    fn cpu_percent_is_of_one_core_over_the_elapsed_jiffies() {
-        // 4 cores, 400 jiffies in all: 100 per core.
+    fn cpu_percent_is_of_the_whole_cpu_over_the_elapsed_jiffies() {
+        // 4 cores, 400 jiffies in all: 100 per core, so one busy core is 25 %.
         let prev = snapshot(
             1000,
             vec![
@@ -398,7 +378,7 @@ mod tests {
         let top = top(Some(&prev), &cur, 5, 4096);
         assert_eq!(
             names(&top.by_cpu),
-            [("two", 200.0), ("busy", 50.0), ("idle", 0.0)]
+            [("two", 50.0), ("busy", 12.5), ("idle", 0.0)]
         );
     }
 
