@@ -507,7 +507,7 @@ fn target_title(item: &Item) -> String {
 }
 
 /// A chip's name: the kind for an item without a target or showing everything, else its target,
-/// short: "CPU", "RAM", "RTX 4060", "/home", "nvme0n1", "wlp4s0".
+/// short: "CPU", "RAM", "Download", "RTX 4060", "/home", "nvme0n1", "wlp4s0".
 #[must_use]
 pub fn short_name(item: &Item, stats: &Stats) -> String {
     let gpu = |gpu: &GpuRef, auto: String| match gpu {
@@ -521,11 +521,13 @@ pub fn short_name(item: &Item, stats: &Stats) -> String {
         Item::GpuUsage(g) | Item::GpuTemp(g) => gpu(g, fl!("gpu")),
         Item::Vram(g) => gpu(g, fl!("vram")),
         Item::DiskUsage(mount) => mount.clone(),
-        Item::DiskRead(DiskRef::All) | Item::DiskWrite(DiskRef::All) => fl!("disk"),
+        Item::DiskRead(DiskRef::All) => fl!("read"),
+        Item::DiskWrite(DiskRef::All) => fl!("write"),
         Item::DiskRead(DiskRef::Disk(id))
         | Item::DiskWrite(DiskRef::Disk(id))
         | Item::NvmeTemp(id) => disk_short(id),
-        Item::Download(NetRef::All) | Item::Upload(NetRef::All) => fl!("network"),
+        Item::Download(NetRef::All) => fl!("download-label"),
+        Item::Upload(NetRef::All) => fl!("upload-label"),
         Item::Download(NetRef::Interface(name)) | Item::Upload(NetRef::Interface(name)) => {
             name.clone()
         }
