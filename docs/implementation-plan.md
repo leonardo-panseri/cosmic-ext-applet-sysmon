@@ -355,6 +355,10 @@ leonardo-panseri/cosmic-flatpak fork. Its description is the maintainer's to wri
 has contributors confirm that, apart from their own app source and manifest, the PR has no LLM-generated
 content, descriptions included.
 
+The first CI run of the public repo failed on clippy's pedantic `doc_markdown` lint. Before the PR was opened,
+the fix went in and `0.1.0` was moved from the release commit to the commit recording this, so the pinned
+commit passes CI.
+
 ---
 
 ## 6. Glossary (seed for CONTEXT.md)
