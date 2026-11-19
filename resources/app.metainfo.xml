@@ -11,8 +11,10 @@
       nothing while you're not looking at it.
     </p>
     <ul>
-      <li>One or two rows in the panel, with download and upload rates, in three layouts</li>
-      <li>Rows turn red when a temperature, memory or a disk crosses its limit</li>
+      <li>Two rows of up to four items in the panel, stacked or on one line, built in the settings: CPU,
+        memory, swap, any GPU's load, temperature or VRAM, a filesystem, disk and network rates, and NVMe
+        drive temperatures</li>
+      <li>An item turns red when its value crosses its own limit</li>
       <li>A popup with 2-minute graphs, per-core load, every GPU, network interface, mount and NVMe drive,
         and the top processes by CPU and memory</li>
       <li>Never wakes a suspended discrete GPU, so hybrid laptops keep their battery life</li>
@@ -37,7 +39,7 @@
     </screenshot>
     <screenshot>
       <image>https://raw.githubusercontent.com/leonardo-panseri/cosmic-ext-applet-sysmon/main/resources/screenshots/builder.png</image>
-      <caption>Building the panel button: two rows of items, such as a GPU's temperature, a disk's usage or a drive's temperature</caption>
+      <caption>Building the panel button: two rows of items to move, retarget or add to</caption>
     </screenshot>
   </screenshots>
   <launchable type="desktop-id">io.github.leonardo_panseri.cosmic-ext-applet-sysmon.desktop</launchable>
@@ -62,4 +64,11 @@
     <keyword>GPU</keyword>
   </keywords>
   <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-11-19">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
 </component>

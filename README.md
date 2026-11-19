@@ -27,8 +27,8 @@ the Omarchy plugin [navjottomer.sysmon][omarchy-sysmon] (design only; no code is
   2-minute graphs.
 - **Popup layout:** one column or two (CPU, memory and GPU beside network, disk and processes). Auto, the
   default, takes two columns when one wouldn't fit the screen's height without scrolling.
-- **Settings page** in the popup, with a builder for the panel button: a live preview, the layout, and the
-  rows as chips to move, remove, retarget or add to. Changes apply at once and are kept.
+- **Settings page** in the popup, with a builder for the panel button: the layout, and the rows as chips
+  to move, remove, retarget or add to. Changes apply to the panel at once and are kept.
 - **Right click** on the panel button, or **Process monitor** in the popup, opens COSMIC's System Monitor,
   or the app you choose in the settings: a desktop ID (`io.missioncenter.MissionCenter`) or a command
   (`kitty -e btop`).

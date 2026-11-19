@@ -19,11 +19,16 @@ _Avoid_: row (for a single value), cell, widget, metric
 **Row**:
 One of the panel button's two ordered lists of up to four items: the top row and the bottom row. On a
 vertical panel a row may stand as a column; it is still a row.
-_Avoid_: line, line of items
+_Avoid_: line, line of items (a **line** is both rows)
+
+**Line**:
+Both rows as one list, the top row first: what the One line layout shows, and what the builder edits in
+that layout. An edit there folds the line back into two rows of about the same length.
+_Avoid_: row (for both rows together)
 
 **Builder**:
-The settings page's sub-page that edits the panel button: a live preview, the layout, and the rows as
-chips.
+The settings page's sub-page that edits the panel button: the layout, and the rows (or, on One line, the
+line) as chips. It has no preview: the panel button itself shows each change.
 _Avoid_: editor, designer
 
 **Popup**:

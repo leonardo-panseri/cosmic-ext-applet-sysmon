@@ -200,8 +200,8 @@ sampler in both tiers. Memory, swap and VRAM show amounts ("5.2G"), not percenta
 
 Inside the popup, like the reference and like codexbar's panel page:
 
-- Panel button: opens the builder of [`docs/panel-builder.md`](panel-builder.md) (live preview, layout,
-  the two rows of items), which replaced the Layout, Top row, Bottom row and Network speed controls
+- Panel button: opens the builder of [`docs/panel-builder.md`](panel-builder.md) (layout, the two rows
+  of items), which replaced the Layout, Top row, Bottom row and Network speed controls
 - Process monitor: a desktop ID or command (D5), with a reset to the default
 - Popup layout: Auto / One column / Two columns (§2.2)
 - Warn at or above: each warning of §2.1 with a switch and its limit, typed or set with − and +
@@ -346,6 +346,14 @@ Each phase ends with something runnable and with its checks passing.
 - Repeat the P1 measurements with the popup closed, then measure with the popup open, both on battery. Write the
   numbers in the README.
 - Metainfo screenshots (`just screenshots` as in codexbar), submission to cosmic-flatpak.
+
+**Released 2026-11-19** as 0.1.0, as codexbar was: `Cargo.toml` was already at 0.1.0, so the tag is an
+annotated `0.1.0` on the release commit, made by hand. The metainfo has a `<release>` for it and passes
+`appstreamcli validate --pedantic`. `just cosmic-flatpak 0.1.0` writes the pop-os/cosmic-flatpak copy of the
+manifest, pinned to the tag and its commit, for a PR from the `add-sysmon-applet` branch of the
+leonardo-panseri/cosmic-flatpak fork. Its description is the maintainer's to write: cosmic-flatpak's PR template
+has contributors confirm that, apart from their own app source and manifest, the PR has no LLM-generated
+content, descriptions included.
 
 ---
 
