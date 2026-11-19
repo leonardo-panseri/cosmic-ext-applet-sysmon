@@ -333,7 +333,7 @@ pub struct Tracker {
     extremes: Extremes,
     /// Each GPU's extremes, by card. Grows when a card appears, so a tick allocates nothing.
     gpu_extremes: Vec<(String, GpuExtremes)>,
-    /// Each NVMe drive's temperature extremes, by its disk, else its name.
+    /// Each `NVMe` drive's temperature extremes, by its disk, else its name.
     drive_extremes: Vec<(String, Option<MinMax>)>,
 }
 
